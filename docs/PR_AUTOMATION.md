@@ -56,7 +56,7 @@ Inherited swarm/relay examples are reference code, not assessed course functiona
 3. Initial setup has been merged into main (PR #1). Later automation changes use the same review/merge process.
 4. Open a small documentation PR from a branch in this repository; inspect Actions logs, description/review comments and changelog commit.
 
-Model: `gemini/gemini-2.5-flash`, including `model_weak`. No fallback model/provider. Input context capped at 32,000 tokens; this is not a monetary spending cap. Free-tier quotas, project billing and Actions minutes are separate concerns. Each PR update requests four analysis tools and can involve multiple model requests/retries. Review provider usage; avoid unnecessary manual reruns. No live model call or cost validation has been performed.
+Model: `gemini/gemini-3.8-flash`, including `model_weak`. No fallback model/provider. Input context capped at 32,000 tokens; this is not a monetary spending cap. Free-tier quotas, project billing and Actions minutes are separate concerns. Each PR update requests four analysis tools and can involve multiple model requests/retries. Review provider usage; avoid unnecessary manual reruns. No live model call or cost validation has been performed.
 
 Free-tier model quota errors need not imply invalid credentials. Do not enable billing or switch providers automatically. Troubleshoot missing secret/authentication, 429 quota errors and GitHub write permissions separately. The CLI is configured to propagate tool failures so Actions can report them; analysis commands continue independently before the runner reports any failures.
 
@@ -77,3 +77,7 @@ Initial live test revealed that PR-Agent needs its GitHub optional dependency an
 Verification checklist: confirm an AI description/review comment appears, inspect provider errors even if the workflow is green, and confirm the bot commit advances CHANGELOG.md from 0.1.0 before claiming end-to-end success.
 
 The pinned release rejects restricted CLI settings such as fallback_models. Trusted TOML is now loaded through the Python settings interface, preserving exact types and avoiding those CLI restrictions. Live verification follows after merge.
+
+Review evidence should link to the successful workflow run and generated changelog commit, so future maintainers can distinguish offline configuration validation from live integration validation.
+
+Google returned 404 for Gemini 2.5 Flash: it is unavailable to new users and recommends Gemini 3.8 Flash. Both model slots now use Gemini 3.8 Flash (free tier listed by Google on 22 October 2026); no billing settings or counter rules changed.
