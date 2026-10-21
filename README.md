@@ -28,4 +28,4 @@ Raw Canvas API responses, signed download links, credentials and personal submis
 
 ## Pull-request automation
 
-CDE1302-specific PR-Agent configuration is installed for Gemini descriptions, reviews, suggestions and automatic changelog/version entries. See [setup, behavior and validation](docs/PR_AUTOMATION.md). The workflow is enabled on main; live API validation is in progress.
+CDE1302-specific PR-Agent configuration is installed for Gemini descriptions, reviews, suggestions and automatic changelog/version entries. See [setup, behavior and validation](docs/PR_AUTOMATION.md). The workflow is enabled on main; final AI/changelog validation is pending recovery from Gemini 503 high-demand errors.
