@@ -66,16 +66,20 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("More human evidence.", result)
         self.assertEqual(result.count(runner.START), 1)
 
-    def test_config_roundtrip_matches_agent_yaml_parser(self):
-        import yaml
+    def test_trusted_config_loaded_without_cli_overrides(self):
         config = tomllib.loads((runner.ROOT / ".pr_agent.toml").read_text())
-        for arg in runner.config_arguments(config):
-            key, encoded = arg[2:].split("=", 1)
-            section, field = key.split(".", 1)
-            self.assertEqual(yaml.safe_load(encoded), config[section][field])
-        self.assertEqual(config["config"]["model_weak"], config["config"]["model"])
-        self.assertFalse(config["config"]["fallback_models"])
-        self.assertFalse(config["config"]["use_repo_settings_file"])
+        class Settings:
+            def __init__(self): self.values = {}
+            def set(self, key, value): self.values[key] = value
+        settings = Settings()
+        runner.apply_config(config, settings)
+        for section, values in config.items():
+            for field, value in values.items():
+                self.assertEqual(settings.values[f"{section}.{field}"], value)
+        self.assertEqual(settings.values["config.model_weak"], settings.values["config.model"])
+        self.assertEqual(settings.values["config.fallback_models"], [])
+        self.assertFalse(settings.values["config.use_repo_settings_file"])
+
 
 
 if __name__ == "__main__":

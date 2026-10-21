@@ -56,20 +56,29 @@ def commit_log_body(body: str, commits: list[dict]) -> str:
     return body.rstrip() + "\n\n" + START + "\n### Auto-generated commit log\n" + "\n".join(lines) + "\n" + END + "\n"
 
 
-def config_arguments(config: dict) -> list[str]:
-    args = []
-    for section, settings in config.items():
-        for key, value in settings.items():
-            # Pass data as argv, never interpolate PR text into a shell.
-            encoded = json.dumps(value)
-            args.append(f"--{section}.{key}={encoded}")
-    return args
+def apply_config(config: dict, settings) -> None:
+    """Load trusted TOML directly; the agent forbids some CLI overrides."""
+    for section, values in config.items():
+        for key, value in values.items():
+            settings.set(f"{section}.{key}", value)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true")
+    parser.add_argument("--agent-command", choices=COMMANDS)
+    parser.add_argument("--pr-url")
     args = parser.parse_args()
+    if args.agent_command:
+        if not args.pr_url:
+            parser.error("--pr-url is required with --agent-command")
+        config = tomllib.loads((ROOT / ".pr_agent.toml").read_text())
+        if config["config"]["use_repo_settings_file"] or config["config"]["use_global_settings_file"]:
+            raise ValueError("Remote settings must remain disabled")
+        from pr_agent.config_loader import get_settings
+        from pr_agent.cli import run
+        apply_config(config, get_settings())
+        raise SystemExit(run([f"--pr_url={args.pr_url}", args.agent_command]))
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
     repository = os.environ["GITHUB_REPOSITORY"]
     number, commands = select_commands(event, os.environ["GITHUB_EVENT_NAME"], repository)
@@ -106,12 +115,11 @@ def main() -> None:
     os.environ["config.use_repo_settings_file"] = "false"
     os.environ["config.use_global_settings_file"] = "false"
     os.environ["config.propagate_tool_errors"] = "true"
-    overrides = config_arguments(config)
     failures = []
     for command in commands:
         print(f"Running {command} on PR #{number}", flush=True)
-        result = subprocess.run([sys.executable, "-m", "pr_agent.cli", f"--pr_url={pr['html_url']}",
-                                 command, *overrides], cwd=ROOT)
+        result = subprocess.run([sys.executable, str(Path(__file__).resolve()),
+                                 "--agent-command", command, "--pr-url", pr["html_url"]], cwd=ROOT)
         if result.returncode:
             failures.append(command)
     if failures:
