@@ -1,7 +1,7 @@
 # CDE1302 Autonomous UAV Exploration. Provider key belongs in Actions secrets.
 [config]
-model = "gemini/gemini-2.5-flash"
-model_weak = "gemini/gemini-2.5-flash"
+model = "gemini/gemini-3.8-flash"
+model_weak = "gemini/gemini-3.8-flash"
 fallback_models = []
 max_model_tokens = 32000
 custom_model_max_tokens = 1000000
