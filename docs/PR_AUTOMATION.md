@@ -29,7 +29,7 @@ Owners, organization members and repository collaborators may post one exact com
 
 Other comments, edited comments, arguments and commands from other authors are not executed. No second automatic PR-Agent action duplicates the CLI calls.
 
-The runner/configuration are checked out from the trusted base revision for PR events, or the default branch for comment events. PR source code is never executed. Remote PR/global settings loading is disabled before the CLI starts; the trusted TOML is supplied through explicit configuration arguments. Changing automation/configuration in a PR therefore takes effect after it is merged into the base, not while reviewing that PR. This is why a separate test PR is needed after activation.
+The runner/configuration are checked out from the trusted base revision for PR events, or the default branch for comment events. PR source code is never executed. Remote PR/global settings loading is disabled before the CLI starts; the trusted TOML is loaded directly into the agent settings in an isolated child process. Changing automation/configuration in a PR therefore takes effect after it is merged into the base, not while reviewing that PR. This is why a separate test PR is needed after activation.
 
 ## Counter rules retained
 
@@ -62,7 +62,7 @@ Free-tier model quota errors need not imply invalid credentials. Do not enable b
 
 ## Validation
 
-Offline unit tests (Python 3.12 with PyYAML):
+Offline unit tests (Python 3.12):
 
 ```sh
 python -m unittest discover -s .github/scripts -p 'test_*.py' -v
@@ -73,3 +73,7 @@ Workflow syntax/expressions can be checked with `actionlint`. These checks make 
 `AGENTS.md` is currently ignored local guidance by user repository configuration. Maintain it locally after changes, but do not silently remove that ignore rule or claim GitHub automation can read it. Shared course context also lives in `README.md`, `docs/PROJECT_CONTEXT.md` and the explicit review instructions.
 
 Initial live test revealed that PR-Agent needs its GitHub optional dependency and early failure propagation configured before request processing. The adapter/propagation fix is included in this PR; a fresh PR after merge will verify the trusted base configuration.
+
+Verification checklist: confirm an AI description/review comment appears, inspect provider errors even if the workflow is green, and confirm the bot commit advances CHANGELOG.md from 0.1.0 before claiming end-to-end success.
+
+The pinned release rejects restricted CLI settings such as fallback_models. Trusted TOML is now loaded through the Python settings interface, preserving exact types and avoiding those CLI restrictions. Live verification follows after merge.
