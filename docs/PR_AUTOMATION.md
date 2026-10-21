@@ -73,3 +73,5 @@ Workflow syntax/expressions can be checked with `actionlint`. These checks make 
 `AGENTS.md` is currently ignored local guidance by user repository configuration. Maintain it locally after changes, but do not silently remove that ignore rule or claim GitHub automation can read it. Shared course context also lives in `README.md`, `docs/PROJECT_CONTEXT.md` and the explicit review instructions.
 
 Initial live test revealed that PR-Agent needs its GitHub optional dependency and early failure propagation configured before request processing. The adapter/propagation fix is included in this PR; a fresh PR after merge will verify the trusted base configuration.
+
+Verification checklist: confirm an AI description/review comment appears, inspect provider errors even if the workflow is green, and confirm the bot commit advances CHANGELOG.md from 0.1.0 before claiming end-to-end success.
