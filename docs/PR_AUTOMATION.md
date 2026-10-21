@@ -81,3 +81,5 @@ The pinned release rejects restricted CLI settings such as fallback_models. Trus
 Review evidence should link to the successful workflow run and generated changelog commit, so future maintainers can distinguish offline configuration validation from live integration validation.
 
 Google returned 404 for Gemini 2.5 Flash: it is unavailable to new users and recommends Gemini 3.8 Flash. Both model slots now use Gemini 3.8 Flash (free tier listed by Google on 22 October 2026); no billing settings or counter rules changed.
+
+Before diagnosing quota or credentials, confirm the configured model is available to the API project; a retired or restricted model can return 404 despite a valid key.
