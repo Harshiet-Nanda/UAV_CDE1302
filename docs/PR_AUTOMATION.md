@@ -77,3 +77,5 @@ Initial live test revealed that PR-Agent needs its GitHub optional dependency an
 Verification checklist: confirm an AI description/review comment appears, inspect provider errors even if the workflow is green, and confirm the bot commit advances CHANGELOG.md from 0.1.0 before claiming end-to-end success.
 
 The pinned release rejects restricted CLI settings such as fallback_models. Trusted TOML is now loaded through the Python settings interface, preserving exact types and avoiding those CLI restrictions. Live verification follows after merge.
+
+Review evidence should link to the successful workflow run and generated changelog commit, so future maintainers can distinguish offline configuration validation from live integration validation.
