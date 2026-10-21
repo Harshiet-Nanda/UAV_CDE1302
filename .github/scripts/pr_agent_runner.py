@@ -105,6 +105,7 @@ def main() -> None:
     # in the child environment as well as in trusted TOML.
     os.environ["config.use_repo_settings_file"] = "false"
     os.environ["config.use_global_settings_file"] = "false"
+    os.environ["config.propagate_tool_errors"] = "true"
     overrides = config_arguments(config)
     failures = []
     for command in commands:

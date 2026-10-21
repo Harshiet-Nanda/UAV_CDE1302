@@ -58,7 +58,7 @@ jobs:
 
       - name: Install pinned PR-Agent
         if: env.PR_AGENT_BOOTSTRAP != 'true' && env.PR_AGENT_SUPERSEDED != 'true'
-        run: python -m pip install 'pr-agent==0.48.0'
+        run: python -m pip install 'pr-agent[github]==0.48.0'
 
       - name: Analyze pull request
         if: env.PR_AGENT_BOOTSTRAP != 'true' && env.PR_AGENT_SUPERSEDED != 'true'
@@ -67,5 +67,6 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GOOGLE_AI_STUDIO.GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           github.user_token: ${{ github.token }}
+          config.propagate_tool_errors: "true"
           LOG_LEVEL: INFO
         run: python .github/scripts/pr_agent_runner.py

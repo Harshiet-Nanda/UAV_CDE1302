@@ -8,7 +8,7 @@ The workflow adapts Harshiet-Nanda/CDE2310_G10_2526's PR-Agent setup. It keeps A
 
 ## Files
 
-- `.github/workflows/pr_agent.yml`: GitHub events, pinned action revisions, Python 3.12, pinned `pr-agent==0.48.0` and permissions.
+- `.github/workflows/pr_agent.yml`: GitHub events, pinned action revisions, Python 3.12, pinned `pr-agent[github]==0.48.0` and permissions.
 - `.github/scripts/pr_agent_runner.py`: event/command authorization, commit-log section and one execution of each requested analysis command.
 - `.github/scripts/test_pr_agent_runner.py`: offline authorization, configuration and commit-log checks.
 - `.pr_agent.toml`: Gemini selection, exclusions and course-specific instructions.
@@ -71,3 +71,5 @@ python -m unittest discover -s .github/scripts -p 'test_*.py' -v
 Workflow syntax/expressions can be checked with `actionlint`. These checks make no GitHub writes, model calls or hardware connections. Live compatibility, secret validity, quotas, posting and changelog commits still require the activation test above.
 
 `AGENTS.md` is currently ignored local guidance by user repository configuration. Maintain it locally after changes, but do not silently remove that ignore rule or claim GitHub automation can read it. Shared course context also lives in `README.md`, `docs/PROJECT_CONTEXT.md` and the explicit review instructions.
+
+Initial live test revealed that PR-Agent needs its GitHub optional dependency and early failure propagation configured before request processing. The adapter/propagation fix is included in this PR; a fresh PR after merge will verify the trusted base configuration.
