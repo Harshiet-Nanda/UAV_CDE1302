@@ -25,3 +25,7 @@ Canvas: https://canvas.nus.edu.sg/courses/96675
 Materials collected on 21 October 2026. PDFs and CAD files remain the property of their respective authors; no new license is granted over course materials. Keep this repository private unless redistribution is authorized.
 
 Raw Canvas API responses, signed download links, credentials and personal submission/grade data are excluded.
+
+## Pull-request automation
+
+CDE1302-specific PR-Agent configuration is prepared for Gemini descriptions, reviews, suggestions and automatic changelog/version entries. See [setup, behavior and validation](docs/PR_AUTOMATION.md). Activation and a live API test are pending.
