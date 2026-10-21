@@ -10,3 +10,4 @@ venv/
 *.ulg
 logs/
 .vscode/
+AGENTS.md
