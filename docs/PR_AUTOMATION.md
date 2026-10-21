@@ -2,7 +2,7 @@
 
 ## Activation status
 
-Configuration activated on main on 22 October 2026 through setup PR #1. The GEMINI_API_KEY secret is present and Actions is enabled; no API key is stored in this checkout. A documentation PR is testing live Gemini output and changelog writes. Successful API use and billing/quota state are not yet established.
+Configuration is enabled on main as of 22 October 2026. Setup/fixes were merged through PRs #1–#4. The GEMINI_API_KEY secret exists, Actions is enabled, trusted event authorization and PR commit-log writes work, and the GitHub adapter loads. End-to-end AI output/changelog verification is **pending provider recovery**: PR #5, workflow run 39638044496, attempts 1 and 2, both received Gemini 3.8 Flash HTTP 503 high-demand errors. No valid AI analysis or changelog increment was produced; baseline remains 0.1.0. No billing settings were changed and no provider fallback was enabled. The key value was never read or displayed. A 503 response does not independently establish the account's billing/quota state. Retry the failed job after provider recovery and verify comments plus a bot changelog commit.
 
 The workflow adapts Harshiet-Nanda/CDE2310_G10_2526's PR-Agent setup. It keeps AI descriptions, reviews, inline improvement suggestions, automatic changelog commits and the same version counter rules. It does not use Release Please or create tags/releases. The 0.1.0 entry seeds this repository's own history, not the unrelated CDE2310 counter.
 
@@ -56,7 +56,7 @@ Inherited swarm/relay examples are reference code, not assessed course functiona
 3. Initial setup has been merged into main (PR #1). Later automation changes use the same review/merge process.
 4. Open a small documentation PR from a branch in this repository; inspect Actions logs, description/review comments and changelog commit.
 
-Model: `gemini/gemini-3.8-flash`, including `model_weak`. No fallback model/provider. Input context capped at 32,000 tokens; this is not a monetary spending cap. Free-tier quotas, project billing and Actions minutes are separate concerns. Each PR update requests four analysis tools and can involve multiple model requests/retries. Review provider usage; avoid unnecessary manual reruns. No live model call or cost validation has been performed.
+Model: `gemini/gemini-3.8-flash`, including `model_weak`. No fallback model/provider. Input context capped at 32,000 tokens; this is not a monetary spending cap. Free-tier quotas, project billing and Actions minutes are separate concerns. Each PR update requests four analysis tools and can involve multiple model requests/retries. Review provider usage; avoid unnecessary manual reruns. Live model requests were attempted but rejected with provider 503 errors; costs/billing were not independently validated.
 
 Free-tier model quota errors need not imply invalid credentials. Do not enable billing or switch providers automatically. Troubleshoot missing secret/authentication, 429 quota errors and GitHub write permissions separately. The CLI is configured to propagate tool failures so Actions can report them; analysis commands continue independently before the runner reports any failures.
 
