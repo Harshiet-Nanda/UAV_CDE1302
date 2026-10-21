@@ -1,8 +1,8 @@
 # CDE1302 PR analysis and changelog
 
-## Prepared status
+## Activation status
 
-Configuration prepared on 22 October 2026. Not activated or tested against GitHub/Gemini yet. No API key is stored in this checkout. The user is completing the GitHub secret/settings steps separately; their actual secret and billing state have not been inspected.
+Configuration activated on main on 22 October 2026 through setup PR #1. The GEMINI_API_KEY secret is present and Actions is enabled; no API key is stored in this checkout. A documentation PR is testing live Gemini output and changelog writes. Successful API use and billing/quota state are not yet established.
 
 The workflow adapts Harshiet-Nanda/CDE2310_G10_2526's PR-Agent setup. It keeps AI descriptions, reviews, inline improvement suggestions, automatic changelog commits and the same version counter rules. It does not use Release Please or create tags/releases. The 0.1.0 entry seeds this repository's own history, not the unrelated CDE2310 counter.
 
@@ -14,7 +14,7 @@ The workflow adapts Harshiet-Nanda/CDE2310_G10_2526's PR-Agent setup. It keeps A
 - `.pr_agent.toml`: Gemini selection, exclusions and course-specific instructions.
 - `CHANGELOG.md`: initial 0.1.0 baseline and future AI-generated entries.
 
-## Operation after activation
+## Operation
 
 Ready, same-repository PRs targeting main trigger `describe`, `review`, `improve` and `update_changelog` once each when opened, reopened, marked ready or updated. Draft/fork/bot events are skipped. Per-PR execution is serialized; superseded push events are skipped before installation/model calls. Human PR text is passed as data through the GitHub API, not inserted into shell commands.
 
@@ -53,7 +53,7 @@ Inherited swarm/relay examples are reference code, not assessed course functiona
 
 1. Add repository Actions secret `GEMINI_API_KEY` (never put it in a tracked file).
 2. Permit Actions and existing-PR/content writes. Leave "Allow GitHub Actions to create and approve pull requests" unticked; this workflow needs neither action.
-3. Review, commit, push and merge these files into main when ready.
+3. Initial setup has been merged into main (PR #1). Later automation changes use the same review/merge process.
 4. Open a small documentation PR from a branch in this repository; inspect Actions logs, description/review comments and changelog commit.
 
 Model: `gemini/gemini-2.5-flash`, including `model_weak`. No fallback model/provider. Input context capped at 32,000 tokens; this is not a monetary spending cap. Free-tier quotas, project billing and Actions minutes are separate concerns. Each PR update requests four analysis tools and can involve multiple model requests/retries. Review provider usage; avoid unnecessary manual reruns. No live model call or cost validation has been performed.
