@@ -46,3 +46,11 @@ Report: at most 10 pages including cover/appendices, excluding source code; sing
 - Integrate event/detection recording, return-to-start and complete mission termination.
 - Validate actual calibration, marker size, sensor quality, communication behavior and flight readiness.
 - Build .ulg + detection reconstruction and report evidence.
+
+## Starter behavior verified by source inspection — 22 October 2026
+
+The inherited architecture notes overstate active obstacle navigation: `TOF_ENABLED=0`, `collision_avoid()` immediately returns false, and GOTO sends direct PX4 position targets without VFH steering or peer-obstacle injection. Blocked-bin feedback remains clear, which limits the older exploration director. MAVLink setpoints and navigation run at 20 Hz; telemetry runs at 10 Hz. The 0.10 m/s navigation constant does not constrain direct-position GOTO.
+
+The firmware waits for START, enters Offboard, arms, targets local NED z=-0.5, then accepts laptop goals/trajectories until LAND. A takeoff timeout can still enter the flying phase while armed. LAND does not itself return to launch. Access-point loss cancels active navigation and attempts ordinary disarm after three seconds; it does not detect a dead laptop process, and cancellation is a no-op without active navigation.
+
+Telemetry provides map XY and heading, but no altitude, roll/pitch, armed/mode status or pose timestamp. One protocol test expects absent PX4 status fields; this mismatch was found by inspection, without running tests. Onboard telemetry latches one claimed tag until reboot; live debug/video detections are separate. No software execution, build, installation or hardware validation was performed during this review.
