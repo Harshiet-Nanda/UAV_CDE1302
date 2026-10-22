@@ -172,6 +172,17 @@ With AprilTags drawn on the frame:
 python3 laptop/tag_stream.py --esp-ip 192.168.1.222
 ```
 
+For the camera pose expressed in each marker frame, use:
+```bash
+python3 laptop/tag_stream_unprocessed.py --esp-ip 192.168.1.222
+```
+It boxes tags and shows/prints `tvec` (camera centre in marker coordinates,
+metres) and `rvec` (Rodrigues axis-angle, radians; camera-to-marker rotation).
+The detector pose is inverted using R_inv = R.T and t_inv = -R.T @ t.
+Add `--no-display` for terminal-only output. The detector still uses its
+existing intrinsics, 0.12 m tag size and Hamming/margin gate; no smoothing or
+body/local transform is applied. Keys: q/Esc quit, s saves the annotated view.
+
 For tuning, use `tag_stream_legacy.py --detail` (or `d` while it runs): it adds
 rejected tags, a HUD and the drone's own detections.
 

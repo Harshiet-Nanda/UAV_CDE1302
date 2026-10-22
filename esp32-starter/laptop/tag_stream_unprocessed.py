@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Display camera-frame AprilTag tvec (metres) and rvec (radians).
+"""Display the camera pose in each AprilTag marker frame.
 
 Run: python laptop/tag_stream_unprocessed.py --esp-ip 192.168.1.222
 Add --no-display for terminal output only. Uses the existing detector's tag
 size, intrinsics and Hamming/margin gate. No body transform or smoothing.
 The detector returns a rotation matrix; rvec is its Rodrigues axis-angle
-representation (tag frame to camera frame), not Euler angles.
+representation of the inverse rotation (camera frame to marker frame),
+not Euler angles. tvec is the camera centre relative to the marker centre.
 """
 
 import argparse
@@ -35,12 +36,15 @@ def to_view(x, y, scale):
 
 
 def pose_vectors(det):
-    """Return raw camera translation and equivalent Rodrigues rotation vector."""
+    """Return camera-in-marker translation and Rodrigues rotation vector."""
     if det.t is None or det.R is None:
         return None
     rotation = np.asarray(det.R, dtype=np.float64).reshape(3, 3)
-    rvec, _ = cv2.Rodrigues(rotation)
-    return np.asarray(det.t, dtype=np.float64), rvec.reshape(3)
+    # Detector: p_camera = R @ p_marker + t. Invert the rigid transform.
+    inverse_rotation = rotation.T
+    translation = -inverse_rotation @ np.asarray(det.t, dtype=np.float64)
+    rvec, _ = cv2.Rodrigues(inverse_rotation)
+    return translation, rvec.reshape(3)
 
 
 def vector_text(name, values, unit):
@@ -68,7 +72,7 @@ def draw_vectors(view, lines):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Camera-frame AprilTag translation and rotation vectors.")
+    parser = argparse.ArgumentParser(description="Camera pose in the AprilTag marker frame.")
     parser.add_argument("--esp-ip", required=True,
                         help="drone IP, 192.168.1.(200 + drone id)")
     parser.add_argument("--fps", type=int, default=0,
@@ -99,11 +103,11 @@ def main():
 
     detector = Detector()           # compiles the drone's C code on first run
     assembler = FrameAssembler()    # joins UDP pieces back into whole JPEGs
-    window = "AprilTags: raw camera-frame tvec / rvec"
+    window = "AprilTags: camera in marker frame"
     if not args.no_display:
         cv2.namedWindow(window, cv2.WINDOW_NORMAL)
     print(f"Asking {esp_ip} for video. Ctrl+C quits; in the window q/Esc quits, s saves.")
-    print("Camera axes: x right, y down, z out of lens. rvec is axis-angle, radians.")
+    print("Each ID defines its own marker frame. tvec: camera position (m); rvec: camera-to-marker axis-angle (rad).")
 
     next_keepalive = 0.0
     view = None
@@ -132,9 +136,9 @@ def main():
                         if vectors is None:
                             continue
                         tvec, rvec = vectors
-                        lines.extend((f"ID {det.id}: " + vector_text("tvec", tvec, "m"),
+                        lines.extend((f"ID {det.id} camera: " + vector_text("tvec", tvec, "m"),
                                       "       " + vector_text("rvec", rvec, "rad")))
-                        print(f"ID {det.id} | {vector_text('tvec', tvec, 'm')} | "
+                        print(f"ID {det.id} camera-in-marker | {vector_text('tvec', tvec, 'm')} | "
                               f"{vector_text('rvec', rvec, 'rad')}", flush=True)
                     if not args.no_display:
                         h, w = gray.shape
