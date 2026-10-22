@@ -1,3 +1,12 @@
+## [0.2.0] - 2026-10-22 [*](https://github.com/Harshiet-Nanda/CDE1302/pull/7)
+Added an unprocessed camera AprilTag stream script to inspect raw pose vectors and documented verified starter firmware behavior and telemetry limits.
+
+### Added / Changed
+- feat(apriltag): add `tag_stream_unprocessed.py` to stream camera-frame AprilTag translation and Rodrigues rotation vectors without body transforms or smoothing.
+
+### Documentation
+- docs(project): document verified starter firmware characteristics, navigation constants, and telemetry limits in `PROJECT_CONTEXT.md`.
+
 ## [0.1.0] - 2026-10-22
 Established the CDE1302 course repository with reference materials, an attributed ESP32 starter snapshot, project context and PR automation configuration.
 
