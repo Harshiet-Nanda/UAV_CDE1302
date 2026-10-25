@@ -3,5 +3,7 @@
 # NED, relative to the takeoff point: x=north, y=east (m)
 # (--map-frame makes them arena coordinates from laptop/setup.yaml)
 0.0,0.0
-0.8,0.0
-0.8,0.8
+0.4,0.0
+0.4,0.4
+0.0,0.4
+0.0,0.0

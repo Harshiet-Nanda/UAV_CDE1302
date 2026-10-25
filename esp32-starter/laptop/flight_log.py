@@ -45,6 +45,7 @@ class FlightLogger:
         self._drone_id = drone_id
         self._print_every_s = print_every_s
         self._t0 = time.monotonic()
+        self.t0 = self._t0          # time.monotonic() of t_s = 0 (shared with tag_logger)
         self._last_print: dict[int, float] = {}
         self._lock = threading.Lock()
         self._file = open(path, "w", newline="")
