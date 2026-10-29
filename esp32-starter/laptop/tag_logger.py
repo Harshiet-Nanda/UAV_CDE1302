@@ -218,7 +218,8 @@ class TagLogger:
 
     def __init__(self, flight_log_path: str, drone_id: int, poses: PoseHistory,
                  t0: Optional[float] = None, altitude: float = ALTITUDE_M,
-                 port: int = AT_DEBUG_PORT, verbose: bool = True) -> None:
+                 port: int = AT_DEBUG_PORT, verbose: bool = True,
+                 on_place=None) -> None:
         stem = Path(flight_log_path).with_suffix("")
         self.path = f"{stem}_tags.csv"
         self.summary_path = f"{stem}_tag_summary.csv"
@@ -228,6 +229,7 @@ class TagLogger:
         self.altitude = altitude
         self.port = port
         self.verbose = verbose
+        self.on_place = on_place        # called (t_capture, packet, rows) per frame
         self.origin: Optional[tuple[float, float]] = None   # set by the mission;
         # otherwise the first telemetry position (the drone on the ground)
         self._offset: Optional[float] = None     # laptop - drone clock (s)
@@ -338,6 +340,7 @@ class TagLogger:
     def _place(self, pkt) -> None:
         t_cap = pkt.frame_ms / 1000.0 + self._offset - pkt.proc_ms / 1000.0
         pose = self.poses.at(t_cap)
+        placed = []
         for d in pkt.detections:
             if d.pose_err < 0:          # failed the firmware gate: likely noise
                 continue
@@ -374,8 +377,14 @@ class TagLogger:
                     row.update(ray_x=round(rx, 3), ray_y=round(ry, 3))
             self._writer.writerow(row)
             self._rows.append(row)
+            placed.append(row)
             if row["used"] and self.verbose:
                 self._announce(d.id)
+        if placed and self.on_place:
+            try:                        # e.g. tag_snapshots; must never break logging
+                self.on_place(t_cap, pkt, placed)
+            except Exception as exc:
+                print(f"[tags] snapshot callback failed: {exc}")
 
     def _announce(self, tid: int) -> None:
         f = fuse([r for r in self._rows if r["used"] and r["tag_id"] == tid])

@@ -27,9 +27,14 @@ Outputs (default next to this file):
     coverage_traj.csv   t,x,y,z (s, NED m), offsets from the start point, 100 Hz
     coverage_traj.png   top view: room, path, camera coverage, speed
 
-Assumes the camera points straight down from the drone centre, with the
-image's wide (320 px) axis across the drone (left-right). The default field
-of view comes from the firmware's QVGA intrinsics in laptop/apriltag_host.py.
+Camera model: the floor area where a whole tag is in view is worked out
+from the firmware's QVGA intrinsics (laptop/apriltag_host.py), the camera's
+tilt (CAMERA_PITCH_DEG: 45 = the current forward-and-down mount, 90 = straight
+down) and a maximum detection range. At 45 deg and 0.5 m it is a wedge from
+~0.1 m to ~1.1 m AHEAD of the drone, up to ~0.8 m to each side, so lanes are
+spaced by that wedge and the first ~0.8 m in front of the start wall is never
+seen (the camera never looks backwards). The heading is held for the whole
+flight, so the wedge always points along --length.
 """
 
 from __future__ import annotations
@@ -50,8 +55,8 @@ import scipy.sparse.linalg as spla
 # (any of them can still be overridden on the command line, e.g. --length 6)
 # ===========================================================================
 ROOM_LENGTH_M = 5.0      # start wall -> far wall, the way the drone's nose points
-ROOM_WIDTH_M  = 4.0      # along the start wall (side wall to side wall)
-MARGIN_M      = 0.7      # closest the path may get to any wall
+ROOM_WIDTH_M  = 1.9      # along the start wall (side wall to side wall)
+MARGIN_M      = 0.5      # closest the path may get to any wall
 ALTITUDE_M    = 0.5      # flying height used for the camera footprint
 LANES         = "across" # "across": side to side, ends at far wall
                          # "along":  lengthwise, returns to the start
@@ -61,12 +66,25 @@ HEADING_DEG   = 0.0      # drone heading (QGC) when its nose points along the ro
 MAX_SPEED_MS  = 0.25     # peak speed; send_trajectory.py refuses > 0.30
 OVERLAP       = 0.15     # overlap between neighbouring lanes (0-0.9)
 TAG_SIZE_M    = 0.12     # tag edge length
+CAMERA_PITCH_DEG = 45.0  # camera tilt below horizontal: 45 = current mount,
+                         # 90 = straight down. Keep equal to CAM_PITCH_DEG in
+                         # laptop/apriltag_host.py.
+MAX_RANGE_M   = 1.2      # furthest camera-to-tag distance that still detects;
+                         # check with tag_stream.py and adjust
+
+# Return pass: after the snake the drone turns 180 deg and flies the same
+# course backwards to the start, camera now facing the start wall (so it sees
+# the strip the first pass can't). Shift it to fill gaps between lanes.
+RETURN_PASS    = True    # False = one pass only, as before
+RETURN_SHIFT_X = 0.0     # m, + = toward the far wall, - = toward the start wall
+RETURN_SHIFT_Y = 0.0     # m, + = to the drone's right (as it faces at takeoff)
 # ===========================================================================
 
 HERE = Path(__file__).resolve().parent
 
 # QVGA (320x240) intrinsics from laptop/apriltag_host.py FIRMWARE_INTRINSICS
 FX, FY, IMG_W, IMG_H = 163.5047216, 153.22210511, 320, 240
+CX, CY = 154.00573087, 107.10222796
 DEFAULT_HFOV = math.degrees(2 * math.atan(IMG_W / 2 / FX))   # ~88.8 deg, across
 DEFAULT_VFOV = math.degrees(2 * math.atan(IMG_H / 2 / FY))   # ~76.1 deg, along
 
@@ -169,37 +187,98 @@ class Plan:
     lanes_r: np.ndarray
     f0: float
     f1: float
-    swath: float          # usable footprint across the lane (m)
-    footlen: float        # usable footprint along the lane (m)
+    fp: Footprint         # what the camera sees, drone frame
     spacing: float        # actual lane spacing (m)
 
 
-def footprint(alt, hfov, vfov, tag) -> tuple[float, float]:
-    """Usable camera footprint (across the drone, along the drone) in metres:
-    the area in which a whole tag of edge `tag` is in view."""
-    swath = 2 * alt * math.tan(math.radians(hfov) / 2) - tag
-    footlen = 2 * alt * math.tan(math.radians(vfov) / 2) - tag
-    if swath <= 0 or footlen <= 0:
-        raise SystemExit("Footprint too small for the tag at this altitude.")
-    return swath, footlen
+CAM_POS_M = (0.02, 0.0, 0.0)   # lens position in the drone frame (apriltag_host.py)
 
 
-def plan_across(L, W, alt, hfov, vfov, tag, overlap, margin, start="centre") -> Plan:
+@dataclass
+class Footprint:
+    """Floor cells (drone frame, f forward / r right) where a whole tag is in view."""
+    F: np.ndarray          # f coordinate of each mask row (m)
+    R: np.ndarray          # r coordinate of each mask column (m)
+    mask: np.ndarray       # bool [len(F), len(R)]
+    g: float               # cell size (m)
+
+    @property
+    def rows(self) -> np.ndarray:
+        return np.where(self.mask.any(axis=1))[0]
+
+    @property
+    def f_lo(self) -> float:
+        return float(self.F[self.rows[0]])
+
+    @property
+    def f_hi(self) -> float:
+        return float(self.F[self.rows[-1]])
+
+    @property
+    def depth(self) -> float:             # extent along f (m)
+        return self.f_hi - self.f_lo + self.g
+
+    @property
+    def half_widths(self) -> np.ndarray:  # per row: how far it reaches sideways
+        return np.array([np.abs(self.R[self.mask[i]]).max() for i in self.rows])
+
+    @property
+    def width(self) -> float:             # extent along r of the whole wedge (m)
+        cols = np.where(self.mask.any(axis=0))[0]
+        return float(self.R[cols[-1]] - self.R[cols[0]]) + self.g
+
+
+def footprint(alt, hfov, vfov, tag, pitch_deg=CAMERA_PITCH_DEG,
+              max_range=MAX_RANGE_M, g=0.02) -> Footprint:
+    """Project the image onto the floor: a cell counts if a tag centred there
+    is fully inside the 320x240 image and within max_range of the lens."""
+    fx = IMG_W / 2 / math.tan(math.radians(hfov) / 2)
+    fy = IMG_H / 2 / math.tan(math.radians(vfov) / 2)
+    cx, cy = CX, CY
+    s, c = math.sin(math.radians(pitch_deg)), math.cos(math.radians(pitch_deg))
+    reach = max_range + 0.1
+    F = np.arange(-reach, reach + g / 2, g)
+    R = np.arange(-reach, reach + g / 2, g)
+    f, r = np.meshgrid(F, R, indexing="ij")
+    bf, br, bd = f - CAM_POS_M[0], r - CAM_POS_M[1], alt - CAM_POS_M[2]
+    # drone -> camera (transpose of apriltag_host.R_BODY_CAM)
+    x_c, y_c, z_c = br, -s * bf + c * bd, c * bf + s * bd
+    ahead = z_c > 0.05
+    z = np.where(ahead, z_c, 1.0)
+    u, v = fx * x_c / z + cx, fy * y_c / z + cy
+    m = 0.5 * tag * fx / z                       # half the tag, in pixels
+    rng = np.sqrt(bf ** 2 + br ** 2 + bd ** 2)
+    mask = (ahead & (u >= m) & (u <= IMG_W - m) & (v >= m) & (v <= IMG_H - m)
+            & (rng <= max_range))
+    if not mask.any():
+        raise SystemExit("The camera sees no usable floor: check --pitch, --altitude, "
+                         "--max-range and --tag-size.")
+    return Footprint(F, R, mask, g)
+
+
+def plan_across(L, W, fp: Footprint, overlap, margin, start="centre") -> Plan:
     """Lanes run side to side (across --width), stepping away from the back
     wall; the path ends at the far wall. The nose stays pointing into the
-    room, so lanes are spaced by the camera's shorter, along-the-drone view."""
-    swath, footlen = footprint(alt, hfov, vfov, tag)
-    step = footlen * (1.0 - overlap)
-    r_in = max(margin, swath / 2)          # lane ends: distance from side walls
-    f_in = max(margin, footlen / 2)        # first/last lane: distance from end walls
+    room, so lanes are spaced by how deep (along f) the camera's view is."""
+    step = fp.depth * (1.0 - overlap)
+    # Lane ends: near enough to the side walls that most of the view reaches
+    # them (30th percentile of how far each row of the view reaches sideways).
+    r_in = max(margin, float(np.percentile(fp.half_widths, 30)))
+    # First lane as close to the back wall as allowed (the view starts ahead
+    # of the drone); last lane just close enough that the view reaches the
+    # far wall.
+    f0 = max(margin, -fp.f_lo)
+    f1 = L - max(margin, fp.f_hi)
     r0, r1 = r_in, W - r_in
-    f0, f1 = f_in, L - f_in
-    if f1 - f0 < 0 or r1 - r0 <= 0:
-        raise SystemExit("Room too small for this --margin.")
+    if r1 - r0 <= 0:
+        raise SystemExit("Room too narrow for this --margin.")
+    f1 = max(f1, f0)                       # short room: one lane, as far back as allowed
     if f1 - f0 < 0.5 * step:              # one lane in the middle sees it all
         lanes = np.array([(f0 + f1) / 2])
     else:
         n = int(math.ceil((f1 - f0) / step - 1e-9)) + 1
+        # U-turns need lanes longer than the lane spacing: add lanes if not
+        n = max(n, int(math.ceil((f1 - f0) / max(r1 - r0 - 0.05, 0.05) - 1e-9)) + 1)
         lanes = np.linspace(f0, f1, n)
     spacing = float(lanes[1] - lanes[0]) if len(lanes) > 1 else 0.0
     if len(lanes) > 1 and r1 - r0 < spacing + 1e-6:
@@ -219,19 +298,18 @@ def plan_across(L, W, alt, hfov, vfov, tag, overlap, margin, start="centre") -> 
         if not corners or np.linalg.norm(corners[-1] - np.array([f, a])) > 1e-9:
             corners.append(np.array([f, a]))
         corners.append(np.array([f, b]))
-    return Plan(corners, lanes, f0, f1, swath, footlen, spacing)
+    return Plan(corners, lanes, f0, f1, fp, spacing)
 
 
-def plan_lanes(L, W, alt, hfov, vfov, tag, overlap, margin, start="centre") -> Plan:
-    swath, footlen = footprint(alt, hfov, vfov, tag)
-    step = swath * (1.0 - overlap)
-
-    r_in = max(margin, swath / 2)          # lane centre-line distance from side walls
-    f_in = max(margin, footlen / 2)        # turn line distance from end walls
+def plan_lanes(L, W, fp: Footprint, overlap, margin, start="centre") -> Plan:
+    step = fp.width * (1.0 - overlap)       # sweeping along f: the widest row counts
+    r_in = max(margin, fp.width / 2)       # lane centre-line distance from side walls
     r0, r_end = r_in, W - r_in
-    f0, f1 = f_in, L - f_in
+    f0 = max(margin, -fp.f_lo)             # turn lines: view reaches the end walls
+    f1 = L - max(margin, fp.f_hi)
     if f1 - f0 <= 0 or W < 2 * margin:
-        raise SystemExit("Room too small for this --margin.")
+        raise SystemExit("Room too small for --lanes along with this --margin and camera "
+                         "view; try --lanes across.")
     if r_end <= r0:
         lanes = np.array([W / 2])
     else:
@@ -251,7 +329,7 @@ def plan_lanes(L, W, alt, hfov, vfov, tag, overlap, margin, start="centre") -> P
             a, b = (f0, f1) if i % 2 == 0 else (f1, f0)
             corners += [np.array([a, r]), np.array([b, r])]
         corners.append(np.array([f0, c]))            # back along the start wall
-        return Plan(corners, lanes, f0, f1, swath, footlen, spacing)
+        return Plan(corners, lanes, f0, f1, fp, spacing)
 
     corners = []
     for i, r in enumerate(lanes):
@@ -265,7 +343,7 @@ def plan_lanes(L, W, alt, hfov, vfov, tag, overlap, margin, start="centre") -> P
         corners.append(np.array([f0, lanes[0]]))
     else:                                        # one lane: there and back
         corners.append(np.array([f0, lanes[0]]))
-    return Plan(corners, lanes, f0, f1, swath, footlen, spacing)
+    return Plan(corners, lanes, f0, f1, fp, spacing)
 
 
 # ---------------------------------------------------------------------------
@@ -440,6 +518,11 @@ def main() -> int:
                     help=f"Camera FOV along the drone (deg, default {DEFAULT_VFOV:.1f})")
     ap.add_argument("--tag-size", type=float, default=TAG_SIZE_M,
                     help="Tag edge (m). Footprint is shrunk by this so a tag is fully in view.")
+    ap.add_argument("--pitch", type=float, default=CAMERA_PITCH_DEG,
+                    help="Camera tilt below horizontal (deg): 45 = current mount, 90 = "
+                         "straight down")
+    ap.add_argument("--max-range", type=float, default=MAX_RANGE_M,
+                    help="Furthest camera-to-tag distance that still detects (m)")
     ap.add_argument("--overlap", type=float, default=OVERLAP,
                     help="Fraction of overlap between neighbouring lanes (0-0.9)")
     ap.add_argument("--lanes", choices=["across", "along"], default=LANES,
@@ -460,6 +543,11 @@ def main() -> int:
                     help="Speed in turns relative to straight lanes (0.2-1)")
     ap.add_argument("--line-step", type=float, default=0.5,
                     help="Max waypoint spacing along straight lanes (m)")
+    ap.add_argument("--no-return", dest="return_pass", action="store_false",
+                    default=RETURN_PASS, help="Only fly the snake once (no return pass)")
+    ap.add_argument("--return-shift", type=float, nargs=2, metavar=("X", "Y"),
+                    default=(RETURN_SHIFT_X, RETURN_SHIFT_Y),
+                    help="Shift of the return pass (m): X toward the far wall, Y to the right")
     ap.add_argument("--out", default=str(HERE / "coverage_traj.csv"))
     ap.add_argument("--no-png", action="store_true")
     a = ap.parse_args()
@@ -470,8 +558,19 @@ def main() -> int:
         raise SystemExit("--overlap must be in [0, 0.9)")
 
     L, W = a.length, a.width
+    fp = footprint(a.altitude, a.hfov, a.vfov, a.tag_size, a.pitch, a.max_range)
+    try:            # warn if the tag maths in laptop/ assumes a different mount
+        import sys as _sys
+        _sys.path.insert(0, str(HERE.parent / "laptop"))
+        from apriltag_host import CAM_PITCH_DEG as _host_pitch
+        if abs(_host_pitch - a.pitch) > 1e-6:
+            print(f"WARNING: --pitch {a.pitch:g} but laptop/apriltag_host.py has "
+                  f"CAM_PITCH_DEG = {_host_pitch:g}; tag positions will be wrong "
+                  f"unless they match the real mount.")
+    except Exception:
+        pass
     planner = plan_across if a.lanes == "across" else plan_lanes
-    plan = planner(L, W, a.altitude, a.hfov, a.vfov, a.tag_size, a.overlap, a.margin, a.start)
+    plan = planner(L, W, fp, a.overlap, a.margin, a.start)
     radius = plan.spacing / 2
     pieces = fillet_polyline(plan.corners, radius)
     wp = build_waypoints(pieces, a.line_step, math.radians(45))
@@ -526,19 +625,42 @@ def main() -> int:
     backward = [i + 1 for i, v in enumerate(v_join)
                 if not wp.stop[i + 1] and v @ wp.u[i + 1] < 0]
 
-    # camera coverage: area of the room where a whole tag is in view at some time
-    g = 0.02
+    # camera coverage: area of the room where a whole tag is in view at some time.
+    # The planning frame's r is the drone's right (left with --sweep left).
+    sign = 1.0 if a.sweep == "right" else -1.0
+    g = fp.g
     nf, nr = int(math.ceil(L / g)), int(math.ceil(W / g))
     seen = np.zeros((nf, nr), bool)
-    hf, hr = plan.footlen / 2, plan.swath / 2
-    for pf, pr in pos[::5]:
-        i0, i1 = max(0, int((pf - hf) / g)), min(nf, int(math.ceil((pf + hf) / g)))
-        j0, j1 = max(0, int((pr - hr) / g)), min(nr, int(math.ceil((pr + hr) / g)))
-        seen[i0:i1, j0:j1] = True
+    ii, jj = np.nonzero(fp.mask)
+    off_f = np.round(fp.F[ii] / g).astype(int)
+    off_r = np.round(sign * fp.R[jj] / g).astype(int)
+    def stamp(path, flip):
+        """Mark what the camera sees along `path`; flip = drone turned 180 deg."""
+        k = -1 if flip else 1
+        for pf, pr in path[::5]:
+            fi = int(round(pf / g)) + k * off_f
+            rj = int(round(pr / g)) + k * off_r
+            ok = (fi >= 0) & (fi < nf) & (rj >= 0) & (rj < nr)
+            seen[fi[ok], rj[ok]] = True
+
+    stamp(pos, False)
     coverage = seen.mean() * 100
+    blind_back = plan.f0 + fp.f_lo            # strip at the start wall never in view
+
+    # Return pass: same course backwards in time, shifted, after a 180 deg turn.
+    pos2 = None
+    if a.return_pass and a.lanes != "across":
+        print("Note: the return pass needs --lanes across (it ends in open space at the "
+              "far side, where turning around is safe); skipping it.")
+    elif a.return_pass:
+        sx, sy = a.return_shift
+        pos2 = pos[::-1] + np.array([sx, sy * sign])
+        stamp(pos2, True)
+        wall2 = np.min(np.column_stack([pos2[:, 0], L - pos2[:, 0],
+                                        pos2[:, 1], W - pos2[:, 1]]), axis=1)
+    coverage_both = seen.mean() * 100
 
     # --- write CSV in NED, relative to the start point ------------------------
-    sign = 1.0 if a.sweep == "right" else -1.0
     df = pos[:, 0] - pos[0, 0]
     dr = (pos[:, 1] - pos[0, 1]) * sign
     psi = math.radians(a.heading)
@@ -551,6 +673,27 @@ def main() -> int:
         for row in zip(t, x, y):
             fh.write(f"{row[0]:.2f},{row[1]:.6f},{row[2]:.6f},0\n")
 
+    def to_ned(p):
+        df_, dr_ = p[:, 0] - pos[0, 0], (p[:, 1] - pos[0, 1]) * sign
+        return (df_ * math.cos(psi) - dr_ * math.sin(psi),
+                df_ * math.sin(psi) + dr_ * math.cos(psi))
+
+    out2 = out.with_name(out.stem + "_return.csv")
+    if pos2 is not None:
+        x2, y2 = to_ned(pos2)            # in pass 1's frame (start of pass 1 = 0, 0)
+        # Turn toward the middle of the room so the turn's small sideways drift
+        # stays away from the side wall the snake ended next to.
+        e1 = pos[-1]
+        toward_centre = (W / 2 - e1[1]) * sign      # + = centre is to the drone's right
+        turn = "right" if toward_centre >= 0 else "left"
+        with open(out2, "w", newline="") as fh:
+            # send_trajectory_logged.py reads these lines to line the pass up
+            fh.write(f"# pass2_start_from_pass1_start: {x2[0]:.6f},{y2[0]:.6f}\n")
+            fh.write(f"# turn: {turn}\n")
+            fh.write("t,x,y,z\n")
+            for row in zip(t, x2 - x2[0], y2 - y2[0]):
+                fh.write(f"{row[0]:.2f},{row[1]:.6f},{row[2]:.6f},0\n")
+
     # same resampling and speed check as send_trajectory.py
     tq = np.arange(0.0, duration + 1e-9, UPLOAD_DT)
     up = np.column_stack([np.interp(tq, t, x), np.interp(tq, t, y)])
@@ -562,15 +705,29 @@ def main() -> int:
     side = "left" if a.sweep == "right" else "right"
     start = plan.corners[0]
     print(f"Room {L:.2f} m (along nose) x {W:.2f} m, altitude {a.altitude:.2f} m")
-    print(f"Usable camera footprint {plan.footlen:.2f} m along x {plan.swath:.2f} m across "
-          f"(tag {a.tag_size:.2f} m fully in view)")
+    hw = fp.half_widths
+    print(f"Camera at {a.pitch:g} deg sees tags {fp.f_lo:+.2f} to {fp.f_hi:+.2f} m ahead, "
+          f"up to +/-{hw.max():.2f} m to the side (within {a.max_range:.2f} m, "
+          f"tag {a.tag_size:.2f} m fully in view)")
+    if blind_back > 0.05:
+        print(f"The first {blind_back:.2f} m in front of the start wall is never in view "
+              f"(the camera looks ahead).")
     print(f"{len(plan.lanes_r)} lane{'s' if len(plan.lanes_r) != 1 else ''}, spacing {plan.spacing:.2f} m, "
           f"turn radius {radius:.2f} m, {len(wp.p)} waypoints")
     print(f"Path {sum(pc.length for pc in pieces):.1f} m, duration {duration:.1f} s, "
           f"peak speed {speed.max():.3f} m/s, peak accel {np.linalg.norm(acc, axis=1).max():.3f} m/s^2")
     print(f"Max deviation from planned path {dev.max() * 100:.1f} cm; "
           f"closest approach to a wall {wall.min():.2f} m")
-    print(f"Camera coverage of the room: {coverage:.0f} %")
+    if pos2 is None:
+        print(f"Camera coverage of the room: {coverage:.0f} %")
+    else:
+        print(f"Camera coverage of the room: {coverage:.0f} % after the snake, "
+              f"{coverage_both:.0f} % with the return pass "
+              f"(shift x={a.return_shift[0]:+.2f} y={a.return_shift[1]:+.2f} m, "
+              f"{duration:.0f} s more)")
+        if wall2.min() < a.margin - 0.01:
+            print(f"WARNING: the return-pass shift brings the path {wall2.min():.2f} m from "
+                  f"a wall (margin {a.margin:.2f} m). Use a smaller --return-shift.")
     if backward:
         print(f"WARNING: velocity reverses at waypoints {backward}; try --turn-speed or --line-step")
     if wall.min() < 0.6:
@@ -595,18 +752,20 @@ def main() -> int:
     if a.lanes == "along" and W > L:
         print("Note: the start wall (--width) is the longer side; lanes still run along "
               "--length, so there will be more turns.")
-    print(f"Wrote {out}")
-    print(f"\npython laptop/send_trajectory.py --drone-id <ID> --takeoff --takeoff-wait 15 "
+    print(f"Wrote {out}" + (f" and {out2}" if pos2 is not None else ""))
+    print(f"\npython laptop/send_trajectory_logged.py --drone-id <ID> --takeoff --takeoff-wait 15 "
           f"--confirm --trajectory {_shown(out)}"
+          + (f" --return-trajectory {_shown(out2)}" if pos2 is not None else "")
           + (f" --dt {dt_needed:.2f}" if n_up > TRAJ_MAX_PTS else ""))
 
     if not a.no_png:
         draw(out.with_suffix(".png"), a, plan, pieces, wp, pos, speed, t, seen, g,
-             coverage, duration, sign, side)
+             coverage_both, duration, sign, side, pos2)
     return 0
 
 
-def draw(png, a, plan, pieces, wp, pos, speed, t, seen, g, coverage, duration, sign, side):
+def draw(png, a, plan, pieces, wp, pos, speed, t, seen, g, coverage, duration, sign, side,
+         pos2=None):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -632,13 +791,19 @@ def draw(png, a, plan, pieces, wp, pos, speed, t, seen, g, coverage, duration, s
     ax.add_collection(lc)
     fig.colorbar(lc, ax=ax, fraction=0.04, pad=0.02).set_label("speed (m/s)")
     ax.plot(X(wp.p[:, 1]), wp.p[:, 0], ".", color="0.35", ms=4, label="min-snap waypoints")
+    if pos2 is not None:
+        ax.plot(X(pos2[:, 1]), pos2[:, 0], "--", color="tab:orange", lw=1.6,
+                label="return pass (after 180 deg turn)")
+        ax.plot(X(pos2[-1, 1]), pos2[-1, 0], "D", color="tab:orange", ms=8,
+                label="return pass ends")
     s = plan.corners[0]
     e = pos[-1]
     returns = np.linalg.norm(e - pos[0]) < 1e-6
     ax.plot(X(s[1]), s[0], "o", color="tab:red", ms=11,
             label="start / finish" if returns else "start")
     if not returns:
-        ax.plot(X(e[1]), e[0], "s", color="k", ms=10, label="finish")
+        ax.plot(X(e[1]), e[0], "s", color="k", ms=10,
+                label="snake ends: turn 180 here" if pos2 is not None else "finish")
     ax.annotate("", xy=(X(s[1]), s[0] + 0.45), xytext=(X(s[1]), s[0]),
                 arrowprops=dict(arrowstyle="-|>", color="tab:red", lw=2.5))
     centred = abs(s[1] - W / 2) < 1e-6
@@ -647,12 +812,15 @@ def draw(png, a, plan, pieces, wp, pos, speed, t, seen, g, coverage, duration, s
              f"DRONE HERE, nose up: {s[0]:.2f} m from back wall, {s[1]:.2f} m from {side} wall"),
             color="tab:red", fontsize=8, fontweight="bold", va="top",
             ha="center" if centred else ("left" if sign > 0 else "right"))
-    # one example footprint
+    # one example of what the camera sees, outlined
     mid = len(pos) // 3
-    fp = Rectangle((X(pos[mid, 1]) - plan.swath / 2, pos[mid, 0] - plan.footlen / 2),
-                   plan.swath, plan.footlen, fill=False, ec="tab:blue", lw=1.2, ls="--")
-    ax.add_patch(fp)
-    ax.plot([], [], ls="--", color="tab:blue", label="camera footprint (tag fully in view)")
+    fpr = plan.fp
+    RR, FF = np.meshgrid(fpr.R, fpr.F)
+    ax.contour(X(pos[mid, 1] + sign * RR), pos[mid, 0] + FF, fpr.mask.astype(float),
+               levels=[0.5], colors="tab:blue", linewidths=1.2, linestyles="--")
+    ax.plot(X(pos[mid, 1]), pos[mid, 0], "o", color="tab:blue", ms=4)
+    ax.plot([], [], ls="--", color="tab:blue",
+            label=f"camera view at {a.pitch:g} deg (tag fully in view)")
     ax.plot([], [], ls=":", color="tab:red", label=f"--margin {a.margin:.2f} m")
     ax.set_xlim(-0.2, W + 0.2)
     ax.set_ylim(-0.2, L + 0.2)
@@ -668,7 +836,8 @@ def draw(png, a, plan, pieces, wp, pos, speed, t, seen, g, coverage, duration, s
     axs.axhline(a.max_speed, color="0.6", ls="--", lw=1)
     axs.set_xlabel("time (s)")
     axs.set_ylabel("speed (m/s)")
-    axs.set_title(f"{duration:.0f} s, peak {speed.max():.2f} m/s")
+    axs.set_title(f"{duration:.0f} s, peak {speed.max():.2f} m/s"
+                  + ("  (return pass: same again, reversed)" if pos2 is not None else ""))
     axs.grid(alpha=0.3)
     fig.tight_layout()
     fig.savefig(png, dpi=130)

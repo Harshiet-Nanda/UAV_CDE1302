@@ -10,6 +10,9 @@ and the tags are drawn on the live plot and the final PNG:
   logs/flight_<time>_tags.csv          every sighting (drone pose, tag in body
                                        and local frame, accepted or why not)
   logs/flight_<time>_tag_summary.csv   one fused position per tag
+  logs/flight_<time>_snaps/            a camera picture of every detection,
+                                       annotated, plus best_tag<ID>.jpg per tag
+                                       (tag_snapshots.py; --no-snaps turns it off)
 Positions printed at the end are relative to the start point, like the
 waypoints. --no-tags turns this off; --altitude sets the assumed flying
 height used to sanity-check sightings (default 0.5 m = CRUISE_ALT_M).
@@ -55,6 +58,7 @@ from typing import Optional
 from comms import CommsNode
 from flight_log import FlightLogger
 from tag_logger import PoseHistory, TagLogger
+from tag_snapshots import SnapshotSaver
 from protocol import (
     CMD_GOTO,
     CMD_HOLD,
@@ -335,6 +339,11 @@ def parse_args() -> argparse.Namespace:
         help="Don't log AprilTag detections.",
     )
     parser.add_argument(
+        "--no-snaps",
+        action="store_true",
+        help="Don't stream the camera or save pictures of detections.",
+    )
+    parser.add_argument(
         "--altitude",
         type=float,
         default=0.5,
@@ -489,12 +498,19 @@ def main() -> int:
 
     # AprilTag sightings (drone's own detector, UDP 5008). Optional: if the
     # port is busy the mission still flies, just without tag logging.
-    tags = None
+    tags = snaps = None
     if not args.no_tags:
         poses = PoseHistory(args.drone_id)
         comms.on_telemetry(poses.feed)
         tags = TagLogger(flog.path, args.drone_id, poses, t0=flog.t0,
                          altitude=args.altitude)
+        if not args.no_snaps:
+            snaps = SnapshotSaver(flog.path, args.drone_id, comms, t0=flog.t0,
+                                  origin_fn=tags._origin)
+            if snaps.start():
+                tags.on_place = snaps.on_detection
+            else:
+                snaps = None
         if not tags.start():
             tags = None
     if not args.no_plot:
@@ -597,8 +613,12 @@ def main() -> int:
             time.sleep(5.0)    # keep logging the descent before closing the log
         comms.stop()
         flog.close()
+        if snaps and not tags:
+            snaps.close()
         if tags:
             fused = tags.close()
+            if snaps:
+                snaps.close()
             if fused:
                 log.info("AprilTags found (relative to the start point):")
                 for tid, f in fused.items():

@@ -151,8 +151,8 @@ class TrajectoryPlot:
         # legend entries for tags appear only once a tag has been drawn
         self._tag_legend = [m.plot([], [], "x", color="0.3", ms=5, label="_tag sighting")[0],
                             m.plot([], [], "*", color="0.3", ms=12, label="_tag estimate")[0]]
-        m.legend(loc="upper right", fontsize=8)
-        self.info = m.text(0.02, 0.02, "", transform=m.transAxes, fontsize=9,
+        m.legend(loc="upper center", bbox_to_anchor=(0.5, -0.09), ncol=4, fontsize=8, frameon=False)
+        self.info = m.text(0.02, 0.02, "", transform=m.transAxes, fontsize=8,
                            family="monospace", va="bottom",
                            bbox=dict(boxstyle="round", fc="white", alpha=0.8))
 
@@ -202,7 +202,7 @@ class TrajectoryPlot:
             if not is_traj:                          # waypoints: show each as a dot
                 self.ref_line.set_marker("o")
                 self.ref_line.set_label("waypoints")
-                self.ax_map.legend(loc="upper right", fontsize=8)
+                self.ax_map.legend(loc="upper center", bbox_to_anchor=(0.5, -0.09), ncol=4, fontsize=8, frameon=False)
             all_e.append(ry + oy)
             all_n.append(rx + ox)
         te, tn = self._draw_tags(d)
@@ -212,9 +212,11 @@ class TrajectoryPlot:
         n = np.concatenate(all_n)
         pad = 0.3
         span = max(e.max() - e.min(), n.max() - n.min()) + 2 * pad
-        self.ax_map.set_xlim(e.min() - pad, e.max() + pad)
+        # room on the right for tag labels like "T12 (+0.51, +1.26)"
+        self.ax_map.set_xlim(e.min() - pad, e.max() + pad + (0.25 * span if te else 0))
         # extra room at the bottom so the stats box never covers the path
-        self.ax_map.set_ylim(n.min() - pad - 0.3 * span, n.max() + pad)
+        n_lines = self._tag_line.count("\n")      # taller stats box -> more room
+        self.ax_map.set_ylim(n.min() - pad - (0.3 + 0.05 * n_lines) * span, n.max() + pad)
 
         # Distance flown and speed from the last two samples
         dist = float(np.sum(np.hypot(np.diff(x), np.diff(y)))) if len(x) > 1 else 0.0
@@ -282,18 +284,24 @@ class TrajectoryPlot:
             m.add_patch(circ)
             self._tag_artists.append(circ)
             self._tag_artists.append(m.annotate(
-                f"T{tid}", (ex, ny), xytext=(6, 6), textcoords="offset points",
-                fontsize=9, fontweight="bold", color="k"))
+                f"T{tid} ({ny:+.2f}, {ex:+.2f})", (ex, ny), xytext=(7, 6),
+                textcoords="offset points", fontsize=8.5, fontweight="bold", color="k",
+                bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none", alpha=0.7)))
             ext_e.append(np.array([ex]))
             ext_n.append(np.array([ny]))
         if fused and self._tag_legend[0].get_label().startswith("_"):
             for h in self._tag_legend:
                 h.set_label(h.get_label()[1:])
-            m.legend(loc="upper right", fontsize=8)
+            m.legend(loc="upper center", bbox_to_anchor=(0.5, -0.09), ncol=4, fontsize=8, frameon=False)
         if rows:
             n_conf = sum(f["confirmed"] for f in fused.values())
             self._tag_line = (f"\ntags {len(fused)} ({n_conf} confirmed), "
-                              f"{len(used)}/{len(rows)} sightings used")
+                              f"{len(used)}/{len(rows)} sightings")
+            # averaged position of each tag, same frame as the plot (from start)
+            for tid, f in fused.items():
+                self._tag_line += (f"\n T{tid:<2d} ({f['x'] - ox:+.2f}, {f['y'] - oy:+.2f})"
+                                   f" ±{f['spread']:.2f} n={f['frames']}"
+                                   + ("" if f["confirmed"] else " ?"))
         return ext_e, ext_n
 
 
@@ -316,6 +324,8 @@ def main() -> int:
     ap.add_argument("--tags", help="Tag sightings CSV (default: <log>_tags.csv if it exists)")
     ap.add_argument("--no-tags", action="store_true",
                     help="With --listen: don't log AprilTag detections (UDP 5008)")
+    ap.add_argument("--no-snaps", action="store_true",
+                    help="With --listen: don't save camera pictures of detections")
     ap.add_argument("--absolute", action="store_true",
                     help="Plot raw positions. Default: the first position is (0, 0)")
     args = ap.parse_args()
@@ -325,7 +335,7 @@ def main() -> int:
 
     ref = load_reference(args.ref) if args.ref else None
 
-    comms = flog = tags = None
+    comms = flog = tags = snaps = None
     if args.listen:
         # Imported here so --file works without the rest of laptop/ on the path
         sys.path.insert(0, str(Path(__file__).parent))
@@ -340,6 +350,14 @@ def main() -> int:
                 poses = PoseHistory(args.drone_id)
                 comms.on_telemetry(poses.feed)
                 tags = TagLogger(flog.path, args.drone_id, poses, t0=flog.t0)
+                if not args.no_snaps:
+                    from tag_snapshots import SnapshotSaver
+                    snaps = SnapshotSaver(flog.path, args.drone_id, comms, t0=flog.t0,
+                                          origin_fn=tags._origin)
+                    if snaps.start():
+                        tags.on_place = snaps.on_detection
+                    else:
+                        snaps = None
                 if not tags.start():
                     tags = None
             except Exception as exc:
@@ -374,7 +392,7 @@ def main() -> int:
             plot.update(data)
             plot.fig.suptitle(f"{title}  (drone {data.drone_id})")
             if args.save:
-                plot.fig.savefig(args.save, dpi=130)
+                plot.fig.savefig(args.save, dpi=130, bbox_inches="tight")
                 print(f"saved {args.save}")
             else:
                 plt.show()
@@ -385,6 +403,8 @@ def main() -> int:
             flog.close()
         if tags:
             tags.close()
+        if snaps:
+            snaps.close()
     return 0
 
 
