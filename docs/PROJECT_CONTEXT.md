@@ -54,3 +54,22 @@ The inherited architecture notes overstate active obstacle navigation: `TOF_ENAB
 The firmware waits for START, enters Offboard, arms, targets local NED z=-0.5, then accepts laptop goals/trajectories until LAND. A takeoff timeout can still enter the flying phase while armed. LAND does not itself return to launch. Access-point loss cancels active navigation and attempts ordinary disarm after three seconds; it does not detect a dead laptop process, and cancellation is a no-op without active navigation.
 
 Telemetry provides map XY and heading, but no altitude, roll/pitch, armed/mode status or pose timestamp. One protocol test expects absent PX4 status fields; this mismatch was found by inspection, without running tests. Onboard telemetry latches one claimed tag until reboot; live debug/video detections are separate. No software execution, build, installation or hardware validation was performed during this review.
+
+## GUI update — 1 November 2026
+
+The `gui` branch upgrades `plot_trajectory.py`, used by the logged waypoint and
+trajectory launchers, to map/camera/height/telemetry panels. See the starter README
+for the complete data contract and limitations. Telemetry preserves its legacy
+55-byte prefix and appends `GUI1` (114 bytes total) for measured NED z, attitude,
+angular rates, velocity, optional total battery draw, source ages and PX4 status.
+Height requires updated firmware; old firmware/logs show unavailable readings.
+The snapshot receiver publishes an annotated preview for the GUI, avoiding UDP
+port contention. Only laptop receive/visualization and telemetry reporting change;
+no mission-control behavior changes. Offline validation is recorded in AGENTS.md;
+no full firmware build, camera hardware test or flight has been performed.
+
+GUI readability update (1 November): telemetry uses four categorised Field/Value
+tables (flight/connection, IMU attitude/rates, velocity, power) in a full-height
+right column, with recent events below. Headings are centred and bold with
+dividers; values align right, alternating rows aid scanning, and stale links are
+amber. Font sizes adapt to window size. Data acquisition and logging are unchanged.

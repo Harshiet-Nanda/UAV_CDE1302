@@ -444,6 +444,24 @@ void wifi_task(void *arg)
 
         pkt.reloc_age_s = 0xFFFF;   /* never relocalised */
 
+        /* Saturated ages distinguish missing/stale PX4 samples from valid zero. */
+        uint32_t gui_now = (uint32_t)(esp_timer_get_time() / 1000);
+#define GUI_AGE(stamp) ((uint16_t)((stamp) == 0 ? 65535u : \
+    ((gui_now - (stamp)) > 65535u ? 65535u : (gui_now - (stamp)))))
+        memcpy(pkt.gui_magic, "GUI1", 4);
+        pkt.z = drone.z; pkt.roll = drone.roll; pkt.pitch = drone.pitch;
+        pkt.rollspeed = drone.rollspeed; pkt.pitchspeed = drone.pitchspeed;
+        pkt.yawspeed = drone.yawspeed;
+        pkt.vx = drone.vx; pkt.vy = drone.vy; pkt.vz = drone.vz;
+        pkt.voltage_v = drone.voltage_v; pkt.current_a = drone.current_a;
+        pkt.pos_age_ms = GUI_AGE(drone.last_pos_ms);
+        pkt.att_age_ms = GUI_AGE(drone.last_att_ms);
+        pkt.battery_age_ms = GUI_AGE(drone.last_battery_ms);
+        pkt.hb_age_ms = GUI_AGE(drone.last_hb_ms);
+        pkt.armed = drone.armed; pkt.main_mode = drone.custom_main_mode;
+        pkt.sub_mode = drone.custom_sub_mode;
+#undef GUI_AGE
+
         /* ---- Send telemetry ---- */
         send(tx_sock, &pkt, sizeof(pkt), 0);
 

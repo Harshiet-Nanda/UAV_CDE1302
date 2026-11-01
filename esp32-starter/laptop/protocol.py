@@ -78,6 +78,24 @@ class TelemetryPacket:
     is_stuck:    bool
     reloc_age_s: int              # seconds since last nav-tag fix (0xFFFF = never)
 
+    # None means absent, stale or not supplied by PX4 (never an assumed zero).
+    z_m: Optional[float] = None
+    roll_rad: Optional[float] = None
+    pitch_rad: Optional[float] = None
+    rollspeed: Optional[float] = None
+    pitchspeed: Optional[float] = None
+    yawspeed: Optional[float] = None
+    vx: Optional[float] = None
+    vy: Optional[float] = None
+    vz: Optional[float] = None
+    voltage_v: Optional[float] = None
+    current_a: Optional[float] = None
+    px4_hb_age_ms: Optional[int] = None
+    px4_link_ok: Optional[bool] = None
+    px4_armed: Optional[int] = None
+    px4_custom_main_mode: Optional[int] = None
+    px4_custom_sub_mode: Optional[int] = None
+
     @property
     def nav_state_name(self) -> str:
         return NAV_STATE_NAMES.get(self.nav_state, f"UNKNOWN({self.nav_state})")
@@ -98,7 +116,29 @@ def parse_telemetry(data: bytes) -> Optional[TelemetryPacket]:
 
     vfh_blocked = [bool(b) for b in vfh_raw]
 
+    extra = {}
+    fmt = "<4s11f4H3B"
+    if len(data) >= _TELEM_HDR_SIZE + struct.calcsize(fmt) and data[55:59] == b"GUI1":
+        values = struct.unpack_from(fmt, data, _TELEM_HDR_SIZE)
+        _, *rest = values
+        ages = rest[11:15]
+        names = ("z_m", "roll_rad", "pitch_rad", "rollspeed", "pitchspeed",
+                 "yawspeed", "vx", "vy", "vz", "voltage_v", "current_a")
+        for i, name in enumerate(names):
+            age = ages[0 if i in (0, 6, 7, 8) else 2 if i >= 9 else 1]
+            extra[name] = rest[i] if age < 2000 and math.isfinite(rest[i]) else None
+        extra.update(px4_hb_age_ms=ages[3], px4_link_ok=ages[3] < 2000,
+                     px4_armed=rest[15] if ages[3] < 2000 else None,
+                     px4_custom_main_mode=rest[16] if ages[3] < 2000 else None,
+                     px4_custom_sub_mode=rest[17] if ages[3] < 2000 else None)
+    elif len(data) == _TELEM_HDR_SIZE + 7:
+        # Older experimental status-only suffix.
+        _, hb_age, armed, main, sub = struct.unpack_from("<HHBBB", data, _TELEM_HDR_SIZE)
+        extra.update(px4_hb_age_ms=hb_age, px4_link_ok=hb_age < 2000,
+                     px4_armed=armed, px4_custom_main_mode=main, px4_custom_sub_mode=sub)
+
     return TelemetryPacket(
+        **extra,
         drone_id    = drone_id,
         ned_x       = ned_x,
         ned_y       = ned_y,

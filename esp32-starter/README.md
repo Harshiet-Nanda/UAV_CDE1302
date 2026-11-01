@@ -230,3 +230,52 @@ python3 laptop/send_trajectory.py --takeoff --takeoff-wait 12 \
 `--confirm` asks for `TRAJ-[drone ID]` before anything is sent.
 
 See `trajectory/README.md` for the included circle and compact minimum-snap ellipse, how to regenerate their CSV files, and the space each path needs.
+
+## Flight dashboard (`gui` branch)
+
+The existing automatically opened `laptop/plot_trajectory.py` window now has four
+panels: a north-up map with a time-coloured path and heading; live camera with
+quality-gated AprilTag outlines/IDs and relative position; height over time;
+and grouped Field/Value tables for Flight & Connection, IMU attitude/rates,
+Velocity and Power, with recent navigation/stuck events below. The tables occupy
+a full-height right column; map/camera sit above a wide height plot. Centred bold
+headings, subtle dividers, alternating rows, aligned values and window-aware font
+sizing improve readability. CSV logging retains the full
+telemetry history. The existing mission launch commands stay the same.
+
+- Launchers: `simple_waypoint_mission_tags.py`, `send_trajectory_logged.py`, and
+  `waypoint_logged.py`. The first two share their existing snapshot receiver;
+  `waypoint_logged.py` starts one when its dashboard is enabled.
+- The camera receiver atomically publishes `<flight>_snaps/preview.jpg` at up to
+  5 Hz. The GUI reads that file, avoiding a second receiver on UDP 5009. Camera
+  labels are host detections on the displayed frame, not confirmation of a
+  localized mission target. Detection snapshots and tag CSVs retain their
+  existing behavior. Leave tags/snapshots enabled for the first two launchers;
+  `--no-tags` or `--no-snaps` disables their preview as well. Close other camera
+  viewers before starting. Missing camera/scanner and stale video are labelled.
+- Height is **-PX4 local NED z**, above the PX4 estimator origin; it is not a
+  rangefinder measurement or a configured flight target. Firmware must be rebuilt
+  and flashed separately to supply height, attitude/rates, velocity and battery
+  readings. The GUI accepts the original 55-byte telemetry and older CSV logs,
+  showing unavailable values instead of inventing measurements.
+- Firmware appends a version-marked `GUI1` extension (114 bytes total), with
+  position/attitude/battery/heartbeat ages. Python omits extended values aged
+  2 seconds or more. It passes through PX4 `ATTITUDE` roll/pitch/angular rates
+  (radians and rad/s), local NED velocity (m/s), and `SYS_STATUS` voltage (V)
+  and **total battery current (A)** if PX4 streams them. Raw acceleration and
+  individual motor currents are not supplied. No stream-rate or flight-control
+  changes are made. An update from the legacy status-only suffix is also read.
+- Live CSV progress and video have separate stale indicators. Full telemetry is
+  in `flight_<time>.csv`; the on-screen event history shows the latest five
+  navigation/stuck changes. Existing tag sightings/estimates remain on the map.
+
+For a display-only replay (no vehicle commands):
+
+```sh
+python laptop/plot_trajectory.py --file logs/flight_<time>.csv --live
+```
+
+Offline validation: protocol legacy/new/stale parsing, CSV round trip and partial
+writes, height sign/missing-value gaps, heading orientation, and a real host
+AprilTag detector on a generated marker with preview clearing. Hardware video,
+PX4 values, flight behavior and a full ESP-IDF build still require validation.

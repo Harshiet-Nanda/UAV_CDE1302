@@ -27,11 +27,16 @@ circle showing the spread of its sightings. --tags points at another file.
 Axes: east (y) to the right, north (x) up, like a map seen from above.
 Positions are shifted so the first one is (0, 0); --absolute shows PX4's raw values.
 Left panel: path coloured by time, start ●, current/end ▲ with heading.
-Right panels: x(t) and y(t), with nav-state changes marked.
+Other panels: live camera with quality-gated AprilTag outlines, measured height,
+and attitude/rates, velocity, battery draw and navigation events. Camera preview
+is shared by SnapshotSaver; this process does not bind camera or command ports.
+Height = -PX4 local NED z, not a rangefinder measurement. Missing values stay blank.
+Extended telemetry requires updated ESP32 firmware; legacy CSVs remain readable.
 """
 
 import argparse
 import csv
+from collections import deque
 import math
 import sys
 import time
@@ -42,6 +47,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.collections import LineCollection
+from matplotlib.text import Text
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +64,9 @@ class LogTail:
         self.origin = (0.0, 0.0)
         self._pos = 0
         self._header_done = False
+        self._columns = []
+        self.extra = []
+        self.last_rx = None
         self.t, self.x, self.y, self.hdg, self.state = [], [], [], [], []
 
     def poll(self) -> bool:
@@ -74,6 +83,7 @@ class LogTail:
                 self._pos = f.tell()
                 if not self._header_done:
                     self._header_done = True
+                    self._columns = next(csv.reader([line]))
                     continue
                 row = next(csv.reader([line]))
                 if len(row) < 6:
@@ -91,6 +101,8 @@ class LogTail:
                 self.y.append(y - self.origin[1])
                 self.hdg.append(float(row[4]))
                 self.state.append(row[5])
+                self.extra.append(dict(zip(self._columns[6:], row[6:])))
+                self.last_rx = time.monotonic()
                 added = True
         return added
 
@@ -124,12 +136,47 @@ def load_reference(path: str) -> tuple[np.ndarray, np.ndarray, bool]:
 
 class TrajectoryPlot:
     def __init__(self, title: str, ref=None):
-        self.fig = plt.figure(figsize=(12, 6.5))
-        gs = self.fig.add_gridspec(2, 2, width_ratios=[1.25, 1])
-        self.ax_map = self.fig.add_subplot(gs[:, 0])
-        self.ax_x = self.fig.add_subplot(gs[0, 1])
-        self.ax_y = self.fig.add_subplot(gs[1, 1], sharex=self.ax_x)
-        self.fig.suptitle(title)
+        self.fig = plt.figure(figsize=(16, 9.5), facecolor="#101827")
+        gs = self.fig.add_gridspec(2, 3, height_ratios=[1.4, 1],
+                                  width_ratios=[1, 1, 0.95], hspace=0.32, wspace=0.32)
+        self.ax_map = self.fig.add_subplot(gs[0, 0])
+        self.ax_camera = self.fig.add_subplot(gs[0, 1])
+        self.ax_height = self.fig.add_subplot(gs[1, :2])
+        self.ax_log = self.fig.add_subplot(gs[:, 2])
+        for ax in (self.ax_map, self.ax_camera, self.ax_height, self.ax_log):
+            ax.set_facecolor("#182438")
+            ax.tick_params(colors="#b9c9df")
+            ax.xaxis.label.set_color("#b9c9df")
+            ax.yaxis.label.set_color("#b9c9df")
+            ax.title.set_color("#ecf3ff")
+            for spine in ax.spines.values():
+                spine.set_color("#42536d")
+        self.fig.suptitle(title, color="#ecf3ff", fontsize=16, fontweight="bold")
+        self.fig.subplots_adjust(top=0.90, bottom=0.09, left=0.055, right=0.98)
+        self.ax_map.set_title("FLIGHT MAP  ·  North ↑", fontweight="bold", pad=12)
+        self.ax_camera.set_title("CAMERA  ·  AprilTag scanner", fontweight="bold", pad=12)
+        self.ax_camera.set_axis_off()
+        self.camera_image = self.ax_camera.imshow(np.zeros((240, 320, 3), dtype=np.uint8))
+        self.camera_note = self.ax_camera.text(
+            0.02, 0.98, "Waiting for camera / snapshot receiver", color="white",
+            va="top", transform=self.ax_camera.transAxes, fontsize=9,
+            bbox=dict(fc="#101827", alpha=0.85, ec="none"))
+        self.preview_path = None
+        self.live = False
+        self._preview_stamp = None
+        self.height_line, = self.ax_height.plot([], [], color="#47d7c5", lw=2)
+        self.ax_height.set_title("HEIGHT  ·  above PX4 local origin", fontweight="bold", pad=12)
+        self.ax_height.set_xlabel("Elapsed time (s)")
+        self.ax_height.set_ylabel("Height (m)")
+        self.ax_height.grid(alpha=0.15)
+        self.height_note = self.ax_height.text(0.02, 0.94, "Awaiting height telemetry",
+            transform=self.ax_height.transAxes, va="top", color="#b9c9df", fontsize=9)
+        self.ax_log.set_axis_off()
+        self.ax_log.set_title("TELEMETRY & EVENTS", color="#ecf3ff",
+                              fontweight="bold", fontsize=12, pad=15)
+        self._build_telemetry_tables()
+        self._events = deque(maxlen=5)
+        self._logged = 0
         self.ref = ref
         self.tags_path = None          # flight_<time>_tags.csv, drawn if present
         self._tag_artists = []
@@ -147,27 +194,35 @@ class TrajectoryPlot:
         self.cur_pt, = m.plot([], [], "^", color="tab:red", ms=9, label="now / end")
         self.hdg_line, = m.plot([], [], "-", color="tab:red", lw=2)
         self.cbar = self.fig.colorbar(self.lc, ax=m, fraction=0.04, pad=0.02)
-        self.cbar.set_label("time (s)")
+        self.cbar.set_label("Elapsed time (s)", color="#b9c9df")
+        self.cbar.ax.tick_params(colors="#b9c9df")
         # legend entries for tags appear only once a tag has been drawn
         self._tag_legend = [m.plot([], [], "x", color="0.3", ms=5, label="_tag sighting")[0],
                             m.plot([], [], "*", color="0.3", ms=12, label="_tag estimate")[0]]
-        m.legend(loc="upper center", bbox_to_anchor=(0.5, -0.09), ncol=4, fontsize=8, frameon=False)
+        m.legend(loc="upper center", bbox_to_anchor=(0.5, -0.09), ncol=4, fontsize=8, frameon=False, labelcolor="#b9c9df")
         self.info = m.text(0.02, 0.02, "", transform=m.transAxes, fontsize=8,
                            family="monospace", va="bottom",
                            bbox=dict(boxstyle="round", fc="white", alpha=0.8))
 
-        self.x_line, = self.ax_x.plot([], [], color="tab:blue", label="actual")
-        self.y_line, = self.ax_y.plot([], [], color="tab:orange", label="actual")
-        self.ax_x.set_ylabel("x north (m)")
-        self.ax_y.set_ylabel("y east (m)")
-        self.ax_y.set_xlabel("time (s)")
-        for a in (self.ax_x, self.ax_y):
-            a.grid(True, alpha=0.3)
-        self._state_marks = []
-        self.fig.tight_layout()
+        self.fig.canvas.mpl_connect("resize_event", lambda _event: self._fit_text())
+        self._fit_text()
+
+    def _fit_text(self):
+        # Preserve the hierarchy when a laptop window is resized.
+        width, height = self.fig.get_size_inches()
+        scale = min(1.15, max(0.75, min(width / 16, height / 9.5)))
+        texts = self.fig.findobj(Text)
+        texts += [cell.get_text() for table in self.telemetry_tables.values()
+                  for cell in table.get_celld().values()]
+        for text in dict.fromkeys(texts):
+            if not hasattr(text, "_dashboard_fontsize"):
+                text._dashboard_fontsize = text.get_fontsize()
+            text.set_fontsize(text._dashboard_fontsize * scale)
 
     def update(self, d: LogTail) -> None:
+        self.update_camera()
         if not d.t:
+            self._fit_text()
             return
         t = np.asarray(d.t)
         x = np.asarray(d.x)
@@ -202,7 +257,7 @@ class TrajectoryPlot:
             if not is_traj:                          # waypoints: show each as a dot
                 self.ref_line.set_marker("o")
                 self.ref_line.set_label("waypoints")
-                self.ax_map.legend(loc="upper center", bbox_to_anchor=(0.5, -0.09), ncol=4, fontsize=8, frameon=False)
+                self.ax_map.legend(loc="upper center", bbox_to_anchor=(0.5, -0.09), ncol=4, fontsize=8, frameon=False, labelcolor="#b9c9df")
             all_e.append(ry + oy)
             all_n.append(rx + ox)
         te, tn = self._draw_tags(d)
@@ -229,25 +284,130 @@ class TrajectoryPlot:
             f"hdg {math.degrees(h):+7.1f}°   v {spd:4.2f} m/s\n"
             f"flown {dist:6.2f} m   n={len(t)}" + self._tag_line)
 
-        # Time series
-        self.x_line.set_data(t, x)
-        self.y_line.set_data(t, y)
-        for a, v in ((self.ax_x, x), (self.ax_y, y)):
-            a.set_xlim(t[0], max(t[-1], t[0] + 1))
-            lo, hi = v.min(), v.max()
-            a.set_ylim(lo - 0.2, hi + 0.2)
+        heights = np.array([-self._number(r.get("z_m")) for r in d.extra])
+        self.height_line.set_data(t, heights)
+        self.ax_height.set_xlim(t[0], max(t[-1], t[0] + 1))
+        valid = heights[np.isfinite(heights)]
+        if len(valid):
+            self.ax_height.set_ylim(min(0, valid.min()) - 0.15, valid.max() + 0.2)
+            self.height_note.set_text(f"Latest: {heights[-1]:.2f} m" if np.isfinite(heights[-1])
+                                      else "Height unavailable / PX4 position stale")
+        else:
+            self.height_note.set_text("Height unavailable · requires GUI telemetry firmware")
+        for i in range(self._logged, len(d.t)):
+            if i == 0 or d.state[i] != d.state[i - 1]:
+                self._events.append(f"{d.t[i]:7.1f}s  Navigation → {d.state[i]}")
+            stuck = d.extra[i].get("is_stuck") == "1"
+            if stuck and (i == 0 or d.extra[i-1].get("is_stuck") != "1"):
+                self._events.append(f"{d.t[i]:7.1f}s  STUCK reported")
+        self._logged = len(d.t)
+        r = d.extra[-1]
+        def value(name, unit="", degrees=False):
+            v = self._number(r.get(name))
+            if not np.isfinite(v):
+                return "unavailable"
+            return f"{math.degrees(v) if degrees else v:.2f}{unit}"
+        age = time.monotonic() - d.last_rx if d.last_rx is not None else float("inf")
+        link = ("LIVE" if age < 2 else f"STALE {age:.1f}s") if self.live else "REPLAY"
+        armed = {"0": "Disarmed", "1": "Armed"}.get(r.get("px4_armed"), "unavailable")
+        mode = r.get("px4_custom_main_mode") or "unavailable"
+        if mode == "6":
+            mode = "Offboard (6)"
+        values = {
+            "flight": [f"D{d.drone_id} · {link}", f"{t[-1]:.1f} s", d.state[-1],
+                       f"{math.degrees(h)%360:.1f}°", armed, mode,
+                       value("px4_hb_age_ms", " ms")],
+            "imu": [value("roll_rad", "°", True), value("pitch_rad", "°", True),
+                    value("rollspeed", " rad/s"), value("pitchspeed", " rad/s"),
+                    value("yawspeed", " rad/s")],
+            "velocity": [value("vx", " m/s"), value("vy", " m/s"), value("vz", " m/s")],
+            "power": [value("voltage_v", " V"), value("current_a", " A")],
+        }
+        # Update existing cells; rebuilding tables on every refresh causes flicker.
+        for category, rows in values.items():
+            table = self.telemetry_tables[category]
+            for row, text in enumerate(rows, start=1):
+                cell = table[row, 1]
+                cell.get_text().set_text(text)
+                cell.get_text().set_color("#7f94ae" if text == "unavailable" else "#edf4ff")
+        self.telemetry_tables["flight"][1, 1].get_text().set_color(
+            "#ffbe71" if link.startswith("STALE") else "#58dfc5")
+        self.event_text.set_text("\n".join(self._events) or "No navigation events yet")
+        self._fit_text()
 
-        # Vertical marks where the nav state changes (TRAJ, FLYING, ARRIVED, …)
-        for m in self._state_marks:
-            m.remove()
-        self._state_marks = []
-        for i in range(1, len(d.state)):
-            if d.state[i] != d.state[i - 1]:
-                for a in (self.ax_x, self.ax_y):
-                    self._state_marks.append(a.axvline(t[i], color="0.7", lw=0.8, ls=":"))
-                self._state_marks.append(self.ax_x.text(
-                    t[i], 1.0, d.state[i], transform=self.ax_x.get_xaxis_transform(),
-                    fontsize=7, rotation=90, va="top", ha="right", color="0.4"))
+    def _build_telemetry_tables(self):
+        """Four stable field/value tables plus a separate recent-event area."""
+        groups = [
+            ("flight", "FLIGHT & CONNECTION",
+             ["Drone / link", "Elapsed time", "Navigation", "Heading", "Arming", "PX4 mode", "Heartbeat age"]),
+            ("imu", "IMU · ATTITUDE & ANGULAR RATES",
+             ["Roll", "Pitch", "Roll rate", "Pitch rate", "Yaw rate"]),
+            ("velocity", "VELOCITY · LOCAL NED",
+             ["North", "East", "Down"]),
+            ("power", "POWER · BATTERY",
+             ["Voltage", "Total current"]),
+        ]
+        self.telemetry_tables = {}
+        y = 0.97
+        for key, title, fields in groups:
+            self.ax_log.text(0.5, y, title, ha="center", va="top",
+                transform=self.ax_log.transAxes, fontsize=9, fontweight="bold", color="#58dfc5")
+            self.ax_log.plot([0.03, 0.97], [y - 0.022]*2,
+                transform=self.ax_log.transAxes, color="#39556d", lw=0.8)
+            height = (len(fields) + 1) * 0.026
+            bottom = y - 0.035 - height
+            table = self.ax_log.table(
+                cellText=[[field, "unavailable"] for field in fields],
+                colLabels=["Field", "Value"], colWidths=[0.48, 0.52],
+                bbox=[0, bottom, 1, height], cellLoc="left")
+            table.auto_set_font_size(False)
+            table.set_fontsize(9)
+            for (row, col), cell in table.get_celld().items():
+                cell.set_edgecolor("#304158")
+                cell.set_linewidth(0.5)
+                cell.set_facecolor("#273c56" if row == 0 else
+                                   "#1a293d" if row % 2 else "#203147")
+                cell.PAD = 0.07
+                text = cell.get_text()
+                text.set_color("#edf4ff" if row == 0 else "#b9c9df")
+                text.set_weight("bold" if row == 0 or col == 1 else "normal")
+                text.set_fontfamily("DejaVu Sans")
+                text.set_ha("center" if row == 0 else "right" if col == 1 else "left")
+            self.telemetry_tables[key] = table
+            y = bottom - 0.025
+        self.ax_log.text(0.5, y, "RECENT EVENTS", ha="center", va="top",
+            transform=self.ax_log.transAxes, fontsize=9, fontweight="bold", color="#58dfc5")
+        self.ax_log.plot([0.03, 0.97], [y - 0.022]*2,
+            transform=self.ax_log.transAxes, color="#39556d", lw=0.8)
+        self.event_text = self.ax_log.text(0.02, y - 0.04, "Waiting for telemetry…",
+            transform=self.ax_log.transAxes, va="top", fontsize=8.5,
+            linespacing=1.65, color="#d7e4f6")
+
+    @staticmethod
+    def _number(value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float("nan")
+
+    def update_camera(self):
+        if not self.preview_path:
+            return
+        path = Path(self.preview_path)
+        try:
+            stamp = path.stat().st_mtime_ns
+            if stamp != self._preview_stamp:
+                image = plt.imread(path)
+                self.camera_image.set_data(image)
+                self.camera_image.set_extent((-0.5, image.shape[1] - 0.5,
+                                              image.shape[0] - 0.5, -0.5))
+                self.ax_camera.set_xlim(-0.5, image.shape[1] - 0.5)
+                self.ax_camera.set_ylim(image.shape[0] - 0.5, -0.5)
+                self._preview_stamp = stamp
+            age = max(0, time.time() - path.stat().st_mtime)
+            self.camera_note.set_text(f"{'LIVE' if age < 2 else 'STALE'} · frame age {age:.1f}s")
+        except (OSError, ValueError):
+            self.camera_note.set_text("Camera unavailable · enable snapshots; close other camera viewers")
 
 
     def _draw_tags(self, d: LogTail) -> tuple[list, list]:
@@ -292,7 +452,7 @@ class TrajectoryPlot:
         if fused and self._tag_legend[0].get_label().startswith("_"):
             for h in self._tag_legend:
                 h.set_label(h.get_label()[1:])
-            m.legend(loc="upper center", bbox_to_anchor=(0.5, -0.09), ncol=4, fontsize=8, frameon=False)
+            m.legend(loc="upper center", bbox_to_anchor=(0.5, -0.09), ncol=4, fontsize=8, frameon=False, labelcolor="#b9c9df")
         if rows:
             n_conf = sum(f["confirmed"] for f in fused.values())
             self._tag_line = (f"\ntags {len(fused)} ({n_conf} confirmed), "
@@ -374,14 +534,15 @@ def main() -> int:
     if not args.absolute:
         title += "  [start = (0, 0)]"
     plot = TrajectoryPlot(title, ref)
+    plot.live = live
+    plot.preview_path = str(Path(path).with_suffix("")) + "_snaps/preview.jpg"
     plot.tags_path = args.tags or str(Path(path).with_suffix("")) + "_tags.csv"
 
     try:
         if live and not args.save:
             def tick(_frame):
-                if data.poll():
-                    plot.update(data)
-                    plot.fig.suptitle(f"{title}  (drone {data.drone_id})")
+                data.poll()
+                plot.update(data)
                 return []
             _anim = FuncAnimation(plot.fig, tick, interval=200, cache_frame_data=False)
             plt.show()

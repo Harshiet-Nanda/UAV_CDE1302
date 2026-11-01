@@ -29,3 +29,10 @@ Raw Canvas API responses, signed download links, credentials and personal submis
 ## Pull-request automation
 
 CDE1302-specific PR-Agent configuration is installed for Gemini descriptions, reviews, suggestions and automatic changelog/version entries. See [setup, behavior and validation](docs/PR_AUTOMATION.md). The workflow is enabled on main; final AI/changelog validation is pending recovery from Gemini 503 high-demand errors.
+
+## Laptop flight dashboard
+
+The `gui` branch upgrades the existing autolaunched window with the flight map,
+AprilTag camera overlay, measured height graph, and telemetry/event log. See the
+[dashboard notes](esp32-starter/README.md#flight-dashboard-gui-branch) for firmware
+compatibility, data availability and camera sharing. Changes are not hardware-tested.

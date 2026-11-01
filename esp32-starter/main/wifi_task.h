@@ -52,6 +52,12 @@ typedef struct __attribute__((packed)) {
     uint8_t  is_stuck;                      /* 1 = STUCK or RETREATING          */
 
     uint16_t reloc_age_s;                   /* always 0xFFFF (no nav-tag fixes) */
+    /* Optional GUI v1 extension. The original 55-byte prefix is unchanged. */
+    uint8_t gui_magic[4];                   /* ASCII GUI1 */
+    float z, roll, pitch, rollspeed, pitchspeed, yawspeed;
+    float vx, vy, vz, voltage_v, current_a;
+    uint16_t pos_age_ms, att_age_ms, battery_age_ms, hb_age_ms;
+    uint8_t armed, main_mode, sub_mode;
 } wifi_telem_pkt_t;
 
 /* ---------------------------------------------------------------------------

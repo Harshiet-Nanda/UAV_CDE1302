@@ -45,6 +45,9 @@ typedef struct {
 
     // Heading: radians, 0 = North, clockwise positive (from ATTITUDE)
     float heading;
+    float roll, pitch, rollspeed, pitchspeed, yawspeed;
+    float voltage_v, current_a;
+    uint32_t last_battery_ms;
 
     // Derived ENU-Z for altitude controller convenience (= -z)
     float enu_z;

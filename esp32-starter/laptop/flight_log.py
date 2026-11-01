@@ -14,7 +14,9 @@ Then watch it live in a second terminal:
 
     python3 laptop/plot_trajectory.py --file logs/flight_<time>.csv --live
 
-CSV columns: t_s, drone_id, x_m, y_m, heading_rad, nav_state, is_stuck
+CSV starts with: t_s, drone_id, x_m, y_m, heading_rad, nav_state, is_stuck
+Optional GUI telemetry columns follow; unavailable/stale measurements are empty.
+Attitude is radians, angular rates rad/s, velocity NED m/s; current is total A.
   t_s   seconds since the logger was created (laptop clock)
   x_m   NED north in the map frame (PX4 local + setup.yaml start offset)
   y_m   NED east  in the map frame
@@ -28,6 +30,11 @@ from pathlib import Path
 from typing import Optional
 
 from protocol import TelemetryPacket
+
+
+EXTRA_FIELDS = ("z_m", "roll_rad", "pitch_rad", "rollspeed", "pitchspeed", "yawspeed",
+                "vx", "vy", "vz", "voltage_v", "current_a", "px4_hb_age_ms",
+                "px4_armed", "px4_custom_main_mode", "px4_custom_sub_mode")
 
 
 class FlightLogger:
@@ -51,7 +58,7 @@ class FlightLogger:
         self._file = open(path, "w", newline="")
         self._writer = csv.writer(self._file)
         self._writer.writerow(["t_s", "drone_id", "x_m", "y_m",
-                               "heading_rad", "nav_state", "is_stuck"])
+                               "heading_rad", "nav_state", "is_stuck", *EXTRA_FIELDS])
         self._file.flush()
         print(f"[flight_log] logging telemetry to {path}")
 
@@ -66,7 +73,8 @@ class FlightLogger:
             self._writer.writerow([f"{t:.3f}", pkt.drone_id,
                                    f"{pkt.ned_x:.4f}", f"{pkt.ned_y:.4f}",
                                    f"{pkt.heading_rad:.4f}", pkt.nav_state_name,
-                                   int(pkt.is_stuck)])
+                                   int(pkt.is_stuck),
+                                   *[getattr(pkt, name, None) for name in EXTRA_FIELDS]])
             self._file.flush()   # so plot_trajectory.py --live sees it at once
 
         if self._print_every_s > 0:

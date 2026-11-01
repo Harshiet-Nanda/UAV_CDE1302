@@ -517,7 +517,22 @@ static void parse_incoming(void)
 
                 xSemaphoreTake(s_state_mutex, portMAX_DELAY);
                 s_state.heading     = heading;
+                s_state.roll = att.roll; s_state.pitch = att.pitch;
+                s_state.rollspeed = att.rollspeed;
+                s_state.pitchspeed = att.pitchspeed;
+                s_state.yawspeed = att.yawspeed;
                 s_state.last_att_ms = now_ms;
+                xSemaphoreGive(s_state_mutex);
+                break;
+            }
+
+            case MAVLINK_MSG_ID_SYS_STATUS: {
+                mavlink_sys_status_t sys;
+                mavlink_msg_sys_status_decode(&msg, &sys);
+                xSemaphoreTake(s_state_mutex, portMAX_DELAY);
+                s_state.voltage_v = sys.voltage_battery == UINT16_MAX ? NAN : sys.voltage_battery / 1000.0f;
+                s_state.current_a = sys.current_battery == -1 ? NAN : sys.current_battery / 100.0f;
+                s_state.last_battery_ms = now_ms;
                 xSemaphoreGive(s_state_mutex);
                 break;
             }

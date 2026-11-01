@@ -77,6 +77,7 @@ class SnapshotSaver:
         self._best: dict[int, tuple[float, Path]] = {}   # tag -> (range, file)
         self._n_saved = self._n_missed = self._n_frames = 0
         self._detector = None
+        self._last_preview = 0.0
         self._cv2 = self._np = None
 
     # -- lifecycle --------------------------------------------------------
@@ -164,10 +165,39 @@ class SnapshotSaver:
                 continue
             t_cap = time.monotonic() - frame.age_ms / 1000.0
             with self._lock:
+                if time.monotonic() - self._last_preview >= 0.2:
+                    self._last_preview = time.monotonic()
+                    try:
+                        self._publish_preview(frame.jpeg)
+                    except Exception as exc:
+                        print(f"[snaps] preview failed: {exc}")
                 self._n_frames += 1
                 self._frames.append((t_cap, frame.frame_id, frame.jpeg))
                 while self._frames and t_cap - self._frames[0][0] > BUFFER_S:
                     self._frames.popleft()
+
+    def _publish_preview(self, jpeg):
+        cv2, np = self._cv2, self._np
+        gray = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_GRAYSCALE)
+        if gray is None:
+            return
+        view = cv2.resize(cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR),
+                          (gray.shape[1] * 2, gray.shape[0] * 2))
+        label = "AprilTag scanner unavailable"
+        if self._detector is not None:
+            from apriltag_host import passes_gate
+            from tag_stream import draw_tag
+            tags = [d for d in self._detector.detect(gray) if passes_gate(d)]
+            for det in tags:
+                draw_tag(view, det, 2)
+            label = "Recognised: " + ", ".join(f"T{d.id}" for d in tags) if tags else "Scanning: no accepted AprilTags"
+        cv2.putText(view, label, (8, view.shape[0] - 12), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(view, label, (8, view.shape[0] - 12), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5, (0, 255, 0), 1, cv2.LINE_AA)
+        temp = self.dir / "preview.tmp.jpg"
+        if cv2.imwrite(str(temp), view):
+            temp.replace(self.dir / "preview.jpg")
 
     # -- detections (called by TagLogger) -----------------------------------
     def on_detection(self, t_cap: float, pkt, rows: list[dict]) -> None:
