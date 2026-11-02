@@ -73,3 +73,16 @@ tables (flight/connection, IMU attitude/rates, velocity, power) in a full-height
 right column, with recent events below. Headings are centred and bold with
 dividers; values align right, alternating rows aid scanning, and stale links are
 amber. Font sizes adapt to window size. Data acquisition and logging are unchanged.
+
+## Flashing setup fix — 2 November 2026
+
+`esp32-starter/flash_drone.sh` now locates firmware beside the script, supporting
+the starter folder inside the course repository. Setup instructions retain the
+actual project path when checking out the ESP-IDF pin. User identified drone ID 7 and Linux USB
+port `/dev/ttyACM0`. Shell syntax and project/
+config discovery passed from three working directories; config was unchanged.
+Both temporary-file commands now use explicit TMPDIR-based XXXXXX templates for
+Linux/macOS compatibility, checked with default and space-containing temporary
+paths. User terminal confirms the pinned ESP-IDF environment loads successfully.
+No firmware build or flash performed by the agent; hardware operation remains
+unverified.
