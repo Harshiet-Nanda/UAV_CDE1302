@@ -16,8 +16,11 @@ esp-apriltag, the VL53L5CX driver and `managed_components/`). The only external
 dependency is ESP-IDF itself:
 
 ```bash
+# Run from esp32-starter/; keep ESP-IDF beside it.
+PROJECT_DIR="$PWD"
 git clone https://github.com/espressif/esp-idf.git ../esp-idf
-cd ../esp-idf && git checkout "$(sed -n 's/^IDF_CHECKOUT_REF=//p' ../esp-everything-qgc-bridge/tools/idf-pin.env)"
+cd ../esp-idf
+git checkout "$(sed -n 's/^IDF_CHECKOUT_REF=//p' "$PROJECT_DIR/tools/idf-pin.env")"
 git submodule update --init --recursive
 ./install.sh esp32s3          # ~2 GB of toolchain into ~/.espressif
 cd -
@@ -41,6 +44,11 @@ generated header really is that drone, flashes, then restores `sdkconfig`:
 
 It finds ESP-IDF automatically (`$IDF_PATH`, `./esp-idf`, `../esp-idf`,
 `~/esp/esp-idf`, `~/esp-idf`), sourcing `export.sh` only if needed.
+
+The firmware root is the folder containing `flash_drone.sh`, even when it is
+inside a larger Git repository. On Linux, specify the actual USB port instead
+of accepting the macOS default, for example `bash flash_drone.sh 22 /dev/ttyACM0`
+(replace 22 with the attached drone's ID).
 
 ### Deterministic drone addresses
 

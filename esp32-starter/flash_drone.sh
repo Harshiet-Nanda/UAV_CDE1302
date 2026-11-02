@@ -23,10 +23,11 @@ WIFI_NETMASK="255.255.255.0"
 die()  { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 step() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 
-# Resolve the project from the script's own location, so cwd does not matter.
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && git rev-parse --show-toplevel 2>/dev/null)" \
-  || die "not inside a git work tree"
+# Firmware lives beside this script, including when nested in a larger repository.
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" \
+  || die "cannot locate firmware project"
 cd "$PROJECT_DIR"
+git rev-parse --show-toplevel >/dev/null 2>&1 || die "not inside a git work tree"
 SDKCONFIG="$PROJECT_DIR/sdkconfig"
 [ -f "$SDKCONFIG" ] || die "no sdkconfig in $PROJECT_DIR"
 git ls-files --error-unmatch sdkconfig >/dev/null 2>&1 \
@@ -95,7 +96,7 @@ fi
 
 # -------------------------------------------------- 2 + 6. sdkconfig custody
 # Install the trap BEFORE the first mutation so every exit path restores.
-BACKUP="$(mktemp -t sdkconfig.before)"
+BACKUP="$(mktemp "${TMPDIR:-/tmp}/sdkconfig.before.XXXXXX")"
 cp "$SDKCONFIG" "$BACKUP"
 WAS_DIRTY=0
 git diff --quiet -- sdkconfig || WAS_DIRTY=1
@@ -159,7 +160,7 @@ HOST_IP="$HOST_IP_PREFIX.$((HOST_IP_BASE + DRONE_ID))"
 DRONE_IP="$DRONE_IP_PREFIX.$((DRONE_IP_BASE + DRONE_ID))"
 
 # awk, not sed -i: no BSD/GNU incompatibility, exact prefix match, appends if absent.
-TMP="$(mktemp -t sdkconfig.new)"
+TMP="$(mktemp "${TMPDIR:-/tmp}/sdkconfig.new.XXXXXX")"
 awk -v id="$DRONE_ID" -v host_ip="$HOST_IP" -v drone_ip="$DRONE_IP" \
     -v gateway="$WIFI_GATEWAY" -v netmask="$WIFI_NETMASK" '
   index($0, "CONFIG_DRONE_ID=")                  == 1 { print "CONFIG_DRONE_ID=" id;            si=1; next }
