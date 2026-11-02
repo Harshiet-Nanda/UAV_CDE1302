@@ -1,0 +1,2 @@
+source /home/harshiet/Documents/CDE1302/esp32-starter/build-kaiwei/gdbinit/symbols
+source /home/harshiet/Documents/CDE1302/esp32-starter/build-kaiwei/gdbinit/connect

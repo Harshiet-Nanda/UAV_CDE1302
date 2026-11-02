@@ -1,0 +1,13 @@
+# Target labels
+ bootloader
+# Source files and their labels
+/home/harshiet/Documents/CDE1302/esp32-starter/build-kaiwei/CMakeFiles/bootloader
+/home/harshiet/Documents/CDE1302/esp32-starter/build-kaiwei/CMakeFiles/bootloader.rule
+/home/harshiet/Documents/CDE1302/esp32-starter/build-kaiwei/CMakeFiles/bootloader-complete.rule
+/home/harshiet/Documents/CDE1302/esp32-starter/build-kaiwei/bootloader-prefix/src/bootloader-stamp/bootloader-build.rule
+/home/harshiet/Documents/CDE1302/esp32-starter/build-kaiwei/bootloader-prefix/src/bootloader-stamp/bootloader-configure.rule
+/home/harshiet/Documents/CDE1302/esp32-starter/build-kaiwei/bootloader-prefix/src/bootloader-stamp/bootloader-download.rule
+/home/harshiet/Documents/CDE1302/esp32-starter/build-kaiwei/bootloader-prefix/src/bootloader-stamp/bootloader-install.rule
+/home/harshiet/Documents/CDE1302/esp32-starter/build-kaiwei/bootloader-prefix/src/bootloader-stamp/bootloader-mkdir.rule
+/home/harshiet/Documents/CDE1302/esp32-starter/build-kaiwei/bootloader-prefix/src/bootloader-stamp/bootloader-patch.rule
+/home/harshiet/Documents/CDE1302/esp32-starter/build-kaiwei/bootloader-prefix/src/bootloader-stamp/bootloader-update.rule

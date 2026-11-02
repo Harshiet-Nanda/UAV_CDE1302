@@ -449,7 +449,15 @@ def main() -> int:
         "# x,y waypoints sent this flight\n"
         + "".join(f"{x},{y}\n" for x, y in waypoints), encoding="utf-8")
     log.info("Logging telemetry to %s", flog.path)
+    snaps = None
     if not args.no_plot:
+        try:
+            from tag_snapshots import SnapshotSaver
+            snaps = SnapshotSaver(flog.path, args.drone_id, comms, t0=flog.t0)
+            if not snaps.start():
+                snaps = None
+        except Exception as exc:
+            log.warning("Camera preview unavailable: %s", exc)
         start_live_plot(flog.path, ref_path)
 
     def handle_interrupt(signum: int, frame: object) -> None:
@@ -534,6 +542,8 @@ def main() -> int:
         if land_sent or (aborted and start_sent):
             time.sleep(5.0)    # keep logging the descent before closing the log
         comms.stop()
+        if snaps:
+            snaps.close()
         flog.close()
         save_plot_png(flog.path, ref_path)
 

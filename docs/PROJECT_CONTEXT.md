@@ -54,3 +54,12 @@ The inherited architecture notes overstate active obstacle navigation: `TOF_ENAB
 The firmware waits for START, enters Offboard, arms, targets local NED z=-0.5, then accepts laptop goals/trajectories until LAND. A takeoff timeout can still enter the flying phase while armed. LAND does not itself return to launch. Access-point loss cancels active navigation and attempts ordinary disarm after three seconds; it does not detect a dead laptop process, and cancellation is a no-op without active navigation.
 
 Telemetry provides map XY and heading, but no altitude, roll/pitch, armed/mode status or pose timestamp. One protocol test expects absent PX4 status fields; this mismatch was found by inspection, without running tests. Onboard telemetry latches one claimed tag until reboot; live debug/video detections are separate. No software execution, build, installation or hardware validation was performed during this review.
+
+## Legacy-firmware GUI — 2 November 2026
+
+The local `gui2` branch was created directly from `kaiwei` (`605980a`). It carries
+the styled `gui` dashboard and shared camera preview, with all extended field/value
+tables removed. Map/reference paths/localized tags/heading and navigation/stuck
+events remain; height is explicitly unavailable. Only laptop GUI/camera integration
+and documentation change: firmware, protocol.py and flight_log.py match kaiwei.
+Existing local sdkconfig edits, esp-idf/ and build-kaiwei/ are preserved.
