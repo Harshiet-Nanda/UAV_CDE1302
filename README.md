@@ -34,5 +34,23 @@ CDE1302-specific PR-Agent configuration is installed for Gemini descriptions, re
 
 The local `gui2` branch starts from `kaiwei` and retains the styled flight map,
 AprilTag camera and event log, with unsupported telemetry tables removed and
-height marked unavailable. Firmware and its telemetry protocol remain unchanged.
+height marked unavailable. That dashboard change retained the legacy telemetry layout.
 See the [dashboard notes](esp32-starter/README.md#legacy-firmware-dashboard-gui2-branch).
+
+
+## Gradual snake turnaround
+
+Local `harshiet` (based on `kaiwei`) now implements a position-holding gradual yaw turn, correction
+and settled-heading gate before the reverse snake. It requires updated ESP32
+firmware. See [turnaround setup, limits and validation](esp32-starter/README.md#gradual-turnaround-before-the-reverse-snake).
+The change has software validation only; hardware testing remains pending.
+
+
+## Launch-position checks
+
+The local firmware also saves pre-arm X/Y, corrects drift after takeoff, and
+verifies/corrects that same X/Y before normal landing with the updated logged
+snake/waypoint clients. Initial tolerance is 10 cm; immediate abort landing stays
+available. See [launch-position recovery](esp32-starter/README.md#verify-launch-xy-after-takeoff-and-before-normal-landing)
+for limits, failure handling and required firmware update. Hardware validation
+remains pending.

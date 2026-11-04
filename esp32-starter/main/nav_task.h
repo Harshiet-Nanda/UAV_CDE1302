@@ -37,6 +37,14 @@ typedef enum {
     NAV_ARRIVED,        /* within arrival radius — goal reached, hold commanded  */
     NAV_STUCK,          /* VFH fully blocked — holding, awaiting laptop rescue   */
     NAV_TRAJ,           /* playing an uploaded trajectory                        */
+    NAV_TURN,           /* holding position, turning/correcting yaw              */
+    NAV_TURN_DONE,      /* aligned and settled; fixed target yaw remains held    */
+    NAV_TURN_FAILED,    /* turn failed; position hold, no trajectory start       */
+    NAV_TAKEOFF_ALIGN,  /* mission owns setpoint: recover pre-arm XY             */
+    NAV_FLIGHT_READY,   /* takeoff altitude and launch XY settled                */
+    NAV_HOME_ALIGN,     /* mission owns setpoint: align before normal landing    */
+    NAV_HOME_READY,     /* launch XY settled; normal landing requested           */
+    NAV_ALIGN_FAILED,   /* hold, waiting for immediate LAND or pilot action      */
 } nav_state_t;
 
 /* ---------------------------------------------------------------------------
@@ -80,6 +88,10 @@ void nav_set_goal_map(float map_x, float map_y, float z);
 /* Cancel goal/trajectory → NAV_IDLE + position hold.  No-op if none active. */
 void nav_cancel(void);
 
+/* Absolute NED yaw in radians; direction is +1 clockwise, -1 anticlockwise.
+ * Duplicate requests for the same active/completed target do not restart it. */
+void nav_turn_start(float target_yaw, float direction);
+
 /* Store points [offset, offset+n) of trajectory upload `id` (`total` points).
  * xyz: n × (x, y, z) float32, NED offsets from the first point (m).
  * A new id or total starts a new upload. Ignored while a trajectory plays. */
@@ -93,3 +105,7 @@ void nav_traj_start(uint8_t id, uint16_t dt_ms);
 
 /* Thread-safe status snapshot. */
 nav_status_t nav_get_status(void);
+
+/* Mission-owned status only; caller must cancel navigation first and gate
+ * laptop movement commands with MISSION_BUSY. */
+void nav_set_mission_status(nav_state_t state, float xy_error);

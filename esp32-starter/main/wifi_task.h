@@ -74,6 +74,8 @@ typedef struct __attribute__((packed)) {
 #define CMD_CAMERA_STREAM 0x07   /* keepalive: pkt, cmd, enable, max_fps, quality */
 #define CMD_TRAJ_DATA     0x08   /* pkt, cmd, id, total(u16), offset(u16), n, n × (x,y,z) f32 */
 #define CMD_TRAJ_START    0x09   /* pkt, cmd, id, dt_ms(u16) */
+#define CMD_HOME_LAND     0x0B   /* align to saved launch XY, then land; immediate LAND remains 0x02 */
+#define CMD_TURN          0x0A   /* standard command: goal_x=absolute yaw rad, goal_y=+/-1 */
 
 /* Largest command datagram (a CMD_TRAJ_DATA chunk of 80 points is 968 B). */
 #define WIFI_CMD_BUF_SIZE 1024
@@ -174,6 +176,10 @@ void wifi_task(void *arg);
 
 /* Returns true once the laptop has sent CMD_LAND. */
 bool wifi_land_requested(void);
+bool wifi_home_land_requested(void);
+void wifi_clear_home_land_request(void);
+bool wifi_hold_requested(void);
+void wifi_clear_hold_request(void);
 
 /* Clear the land-request flag (call after acting on it). */
 void wifi_clear_land_request(void);

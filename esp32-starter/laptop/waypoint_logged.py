@@ -13,7 +13,8 @@ Needs flight_log.py and plot_trajectory.py in the same folder.
 Custom UDP commands (see protocol.py):
   - CMD_START : arm + take off to the firmware's cruise altitude
   - CMD_GOTO  : fly to a map-frame (x, y); resent until the drone acts on it
-  - CMD_LAND  : land in place
+  - CMD_HOME_LAND: verify/correct launch XY, then land normally
+  - CMD_LAND  : immediate abort landing in place
 
 Waypoints are relative to the takeoff point unless --map-frame is given,
 in which case they are arena coordinates and setup.yaml's start offset is sent.
@@ -44,6 +45,7 @@ from typing import Optional
 
 from comms import CommsNode
 from flight_log import FlightLogger
+from launch_alignment import wait_launch_alignment
 from protocol import (
     CMD_GOTO,
     CMD_HOLD,
@@ -270,7 +272,7 @@ def parse_args() -> argparse.Namespace:
         "--takeoff-wait",
         type=float,
         default=10.0,
-        help="Seconds to wait after CMD_START before sending the first waypoint.",
+        help="Minimum wait after CMD_START; launch XY verification is also required.",
     )
     parser.add_argument(
         "--arrival-timeout",
@@ -483,8 +485,12 @@ def main() -> int:
         log.info("Sending CMD_START (arm + takeoff)")
         send_command(comms, args.drone_id, CMD_START, "CMD_START")
         start_sent = True
-        if args.takeoff_wait > 0.0:
-            time.sleep(args.takeoff_wait)
+        def alignment_sample():
+            snapshot = tracker.latest()
+            return snapshot.packet, snapshot.received_at
+
+        wait_launch_alignment(alignment_sample, min_wait=max(0.0, args.takeoff_wait))
+        log.info("Takeoff launch XY verified.")
 
         missed = 0
         for index, (goal_x, goal_y) in enumerate(waypoints, start=1):
@@ -514,8 +520,11 @@ def main() -> int:
             time.sleep(0.5)
 
         if args.finish_action == "land":
-            log.info("Sending CMD_LAND")
-            send_command(comms, args.drone_id, CMD_LAND, "CMD_LAND", repeat=3)
+            wait_launch_alignment(
+                alignment_sample, landing=True,
+                send=lambda cmd, name: send_command(comms, args.drone_id, cmd, name),
+            )
+            log.info("Launch XY verified; firmware starting normal landing.")
             land_sent = True
         else:
             log.info("Sending CMD_HOLD")

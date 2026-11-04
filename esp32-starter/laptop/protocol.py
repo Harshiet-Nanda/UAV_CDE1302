@@ -35,6 +35,8 @@ CMD_SET_PEERS     = 0x06   # update nearby drone positions for inter-drone avoid
 CMD_CAMERA_STREAM = 0x07   # camera preview keepalive
 CMD_TRAJ_DATA     = 0x08   # trajectory chunk upload
 CMD_TRAJ_START    = 0x09   # play the uploaded trajectory
+CMD_TURN          = 0x0A   # goal_x=absolute yaw radians; goal_y=+1 right / -1 left
+CMD_HOME_LAND     = 0x0B   # recover saved pre-arm XY, then normal landing
 
 VFH_BINS    = 32
 
@@ -45,6 +47,14 @@ NAV_FLYING     = 2
 NAV_ARRIVED    = 3
 NAV_STUCK      = 4
 NAV_TRAJ       = 5   # playing an uploaded trajectory
+NAV_TURN       = 6
+NAV_TURN_DONE  = 7
+NAV_TURN_FAILED = 8
+NAV_TAKEOFF_ALIGN = 9
+NAV_FLIGHT_READY = 10
+NAV_HOME_ALIGN = 11
+NAV_HOME_READY = 12
+NAV_ALIGN_FAILED = 13
 
 NAV_STATE_NAMES = {
     NAV_IDLE:       "IDLE",
@@ -53,6 +63,14 @@ NAV_STATE_NAMES = {
     NAV_ARRIVED:    "ARRIVED",
     NAV_STUCK:      "STUCK",
     NAV_TRAJ:       "TRAJ",
+    NAV_TURN:       "TURN",
+    NAV_TURN_DONE:  "TURN_DONE",
+    NAV_TURN_FAILED: "TURN_FAILED",
+    NAV_TAKEOFF_ALIGN: "TAKEOFF_ALIGN",
+    NAV_FLIGHT_READY: "FLIGHT_READY",
+    NAV_HOME_ALIGN: "HOME_ALIGN",
+    NAV_HOME_READY: "HOME_READY",
+    NAV_ALIGN_FAILED: "ALIGN_FAILED",
 }
 
 # ---------------------------------------------------------------------------

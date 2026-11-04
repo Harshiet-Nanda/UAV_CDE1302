@@ -1,4 +1,5 @@
 #include "nav_task.h"
+#include "turn_profile.h"
 #include "mavlink_task.h"
 #include "tof_task.h"
 #include "vfh.h"
@@ -47,6 +48,13 @@ static uint16_t   s_traj_dt_ms;
 static float      s_traj_org[3];   /* odom position where playback started        */
 static float      s_traj_yaw;
 static int64_t    s_traj_t0_us;
+
+/* Protected by s_mutex, including setpoint publication and cancellation. */
+static struct {
+    float x, y, z, start, delta, target, last_heading, rate;
+    uint32_t last_att_ms;
+    int64_t requested_us, rotate_us, settled_us, stopped_us;
+} s_turn;
 
 /* ---------------------------------------------------------------------------
  * Helpers
@@ -263,6 +271,67 @@ static void traj_tick(void)
         s_traj_yaw);
 }
 
+/* Position hold throughout braking, rotation and final heading correction. */
+static void turn_tick(void)
+{
+    drone_state_t st = mavlink_get_state();
+    int64_t now = esp_timer_get_time();
+    uint32_t ms = (uint32_t)(now / 1000);
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (s_nav.state != NAV_TURN && s_nav.state != NAV_TURN_DONE) {
+        xSemaphoreGive(s_mutex);
+        return;
+    }
+    bool fresh = mavlink_position_valid() && (uint32_t)(ms-st.last_att_ms) < 500
+                 && (uint32_t)(ms-st.last_hb_ms) < 1500;
+    float drift = hypotf(st.x-s_turn.x, st.y-s_turn.y);
+    bool valid = fresh && st.armed && st.custom_main_mode == PX4_MAIN_MODE_OFFBOARD
+        && isfinite(st.heading) && isfinite(drift) && isfinite(st.z)
+        && isfinite(st.vx) && isfinite(st.vy) && isfinite(st.vz);
+    if (!valid || drift > 0.5f || fabsf(st.z-s_turn.z) > 0.3f
+        || (s_nav.state == NAV_TURN && (now-s_turn.requested_us)*1e-6f > TURN_TIMEOUT_S)) {
+        s_nav.state = s_status.state = NAV_TURN_FAILED;
+        /* Keep holding the captured position; discard further yaw motion. */
+        mavlink_set_position_ned(s_turn.x, s_turn.y, s_turn.z,
+                                 isfinite(st.heading) ? st.heading : s_turn.start);
+        xSemaphoreGive(s_mutex);
+        ESP_LOGW(TAG, "Turn failed: telemetry/mode, drift or timeout; holding");
+        return;
+    }
+    float speed = sqrtf(st.vx*st.vx + st.vy*st.vy + st.vz*st.vz);
+    bool new_att = st.last_att_ms != s_turn.last_att_ms;
+    if (new_att) {
+        float dt = (uint32_t)(st.last_att_ms-s_turn.last_att_ms)*0.001f;
+        s_turn.rate = turn_wrap(st.heading-s_turn.last_heading) / fmaxf(dt, 0.001f);
+        s_turn.last_att_ms = st.last_att_ms;
+        s_turn.last_heading = st.heading;
+    }
+    /* Stop translation for one second before starting the yaw profile. */
+    if (!s_turn.rotate_us) {
+        if (speed > 0.10f || !turn_aligned(st.heading, s_turn.start, s_turn.rate))
+            s_turn.stopped_us = 0;
+        else if (!s_turn.stopped_us) s_turn.stopped_us = now;
+        else if (now-s_turn.stopped_us >= 1000000) s_turn.rotate_us = now;
+    }
+    float elapsed = s_turn.rotate_us ? (now-s_turn.rotate_us)*1e-6f : 0.0f;
+    float yaw = turn_heading(s_turn.start, s_turn.delta, elapsed);
+    mavlink_set_position_ned(s_turn.x, s_turn.y, s_turn.z, yaw);
+    s_status.heading_error_rad = turn_wrap(s_turn.target-st.heading);
+    s_status.dist_to_goal = drift;
+    bool aligned = s_turn.rotate_us && elapsed >= turn_duration(s_turn.delta)
+        && turn_aligned(st.heading, s_turn.target, s_turn.rate)
+        && speed <= 0.10f && drift <= 0.15f && fabsf(st.z-s_turn.z) <= 0.15f;
+    if (!aligned) {
+        s_turn.settled_us = 0;
+        s_nav.state = s_status.state = NAV_TURN;
+    } else if (new_att) {
+        if (!s_turn.settled_us) s_turn.settled_us = now;
+        if (now-s_turn.settled_us >= 1000000)
+            s_nav.state = s_status.state = NAV_TURN_DONE;
+    }
+    xSemaphoreGive(s_mutex);
+}
+
 /* ---------------------------------------------------------------------------
  * nav_tick — executed every 100 ms (10 Hz) by nav_task
  * --------------------------------------------------------------------------- */
@@ -270,7 +339,8 @@ static void traj_tick(void)
  * Call with s_mutex held. */
 static bool goal_unchanged(const nav_internal_t *nav)
 {
-    return s_nav.has_goal && s_nav.goal_map_x == nav->goal_map_x
+    return s_nav.has_goal && s_nav.state == nav->state
+                          && s_nav.goal_map_x == nav->goal_map_x
                           && s_nav.goal_map_y == nav->goal_map_y;
 }
 
@@ -280,6 +350,12 @@ static void nav_tick(const vfh_config_t *vfh_cfg)
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     nav_internal_t nav = s_nav;
     xSemaphoreGive(s_mutex);
+
+    if (nav.state == NAV_TURN || nav.state == NAV_TURN_DONE) {
+        turn_tick();
+        return;
+    }
+    if (nav.state == NAV_TURN_FAILED) return;
 
     /* --- Emergency collision avoidance (pre-empts everything, even idle) --- */
     float hold_z = nav.has_goal ? nav.goal_z : -0.5f;  /* fallback cruise alt */
@@ -416,6 +492,46 @@ void nav_cancel(void)
     ESP_LOGI(TAG, "Navigation cancelled — holding");
 }
 
+void nav_turn_start(float target_yaw, float direction)
+{
+    drone_state_t st = mavlink_get_state();
+    uint32_t ms = (uint32_t)(esp_timer_get_time()/1000);
+    if (!isfinite(target_yaw) || (direction != 1.0f && direction != -1.0f)
+        || !st.armed || st.custom_main_mode != PX4_MAIN_MODE_OFFBOARD
+        || !mavlink_position_valid() || (uint32_t)(ms-st.last_att_ms) >= 500
+        || (uint32_t)(ms-st.last_hb_ms) >= 1500 || !isfinite(st.heading)
+        || !isfinite(st.x) || !isfinite(st.y) || !isfinite(st.z)) return;
+    target_yaw = turn_wrap(target_yaw);
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (s_nav.state == NAV_TRAJ || s_nav.state == NAV_TURN_FAILED) {
+        xSemaphoreGive(s_mutex);
+        return;
+    }
+    if (s_nav.state == NAV_TURN || s_nav.state == NAV_TURN_DONE) {
+        /* Never restart a turn due to UDP retries, nor replace its target. */
+        xSemaphoreGive(s_mutex);
+        return;
+    }
+    memset(&s_turn, 0, sizeof(s_turn));
+    s_turn.x=st.x; s_turn.y=st.y; s_turn.z=st.z;
+    s_turn.start=st.heading; s_turn.target=target_yaw;
+    float delta=turn_wrap(target_yaw-st.heading);
+    if (fabsf(delta) > TURN_TOL_RAD) {
+        if (direction > 0 && delta < 0) delta += 2.0f*TURN_PI;
+        if (direction < 0 && delta > 0) delta -= 2.0f*TURN_PI;
+    }
+    s_turn.delta=delta;
+    s_turn.last_att_ms=st.last_att_ms; s_turn.last_heading=st.heading;
+    s_turn.requested_us=esp_timer_get_time();
+    s_nav.state=s_status.state=NAV_TURN;
+    s_nav.has_goal=true;
+    s_nav.goal_z=st.z;
+    mavlink_set_position_ned(st.x, st.y, st.z, st.heading);
+    xSemaphoreGive(s_mutex);
+    ESP_LOGI(TAG, "Turn holding position: target %.1f deg, profile %.1f s",
+             target_yaw*180.0f/TURN_PI, turn_duration(delta));
+}
+
 void nav_traj_put(uint8_t id, uint16_t total, uint16_t offset,
                   const void *xyz, int n)
 {
@@ -449,7 +565,17 @@ void nav_traj_start(uint8_t id, uint16_t dt_ms)
     const char *err = NULL;
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
-    if (s_nav.state == NAV_TRAJ)          err = "already playing";
+    if (s_nav.state == NAV_TURN || s_nav.state == NAV_TURN_FAILED)
+                                        err = "turn not settled";
+    else if (s_nav.state == NAV_TURN_DONE &&
+             (!turn_aligned(st.heading, s_turn.target, s_turn.rate)
+              || hypotf(st.x-s_turn.x, st.y-s_turn.y) > 0.15f
+              || fabsf(st.z-s_turn.z) > 0.15f
+              || !isfinite(st.vx) || !isfinite(st.vy) || !isfinite(st.vz)
+              || sqrtf(st.vx*st.vx + st.vy*st.vy + st.vz*st.vz) > 0.10f
+              || (uint32_t)(esp_timer_get_time()/1000-st.last_att_ms) >= 500))
+                                        err = "turn alignment lost";
+    else if (s_nav.state == NAV_TRAJ)     err = "already playing";
     else if (id == 0 || id != s_traj_id) err = "unknown upload id";
     else if (dt_ms == 0)                 err = "dt_ms is 0";
     else if (!flying)                    err = "not armed in OFFBOARD";
@@ -460,7 +586,8 @@ void nav_traj_start(uint8_t id, uint16_t dt_ms)
         s_traj_org[0] = st.x;
         s_traj_org[1] = st.y;
         s_traj_org[2] = st.z;
-        s_traj_yaw    = st.heading;
+        /* Retain the intended camera heading, not residual measured error. */
+        s_traj_yaw    = s_nav.state == NAV_TURN_DONE ? s_turn.target : st.heading;
         s_traj_dt_ms  = dt_ms;
         s_traj_t0_us  = esp_timer_get_time();
         s_traj_id     = 0;              /* consume: a repeated START cannot replay */
@@ -477,6 +604,15 @@ void nav_traj_start(uint8_t id, uint16_t dt_ms)
         ESP_LOGI(TAG, "Trajectory start: %u pts @ %u ms from odom (%.2f, %.2f, %.2f)",
                  n, dt_ms, st.x, st.y, st.z);
     }
+}
+
+void nav_set_mission_status(nav_state_t state, float xy_error)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_nav.state = s_status.state = state;
+    s_nav.has_goal = false;
+    s_status.dist_to_goal = xy_error;
+    xSemaphoreGive(s_mutex);
 }
 
 nav_status_t nav_get_status(void)

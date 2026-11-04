@@ -30,6 +30,8 @@ static const char *TAG = "wifi";
 #define WIFI_CRUISE_ALT_M   0.5f
 
 static volatile bool s_land_requested  = false;
+static volatile bool s_home_land_requested = false;
+static volatile bool s_hold_requested = false;
 static volatile bool s_start_requested = false;
 static volatile mission_phase_t s_phase = MISSION_BUSY;
 static volatile bool s_wifi_connected  = false;
@@ -174,6 +176,17 @@ static void handle_command(const wifi_cmd_pkt_t *cmd)
         nav_set_goal_map(cmd->goal_x, cmd->goal_y, -(WIFI_CRUISE_ALT_M));
         ESP_LOGI(TAG, "CMD_GOTO map(%.2f,%.2f)", cmd->goal_x, cmd->goal_y);
         break;
+    case CMD_TURN:
+        if (s_phase == MISSION_FLYING)
+            nav_turn_start(cmd->goal_x, cmd->goal_y);
+        else ESP_LOGW(TAG, "CMD_TURN ignored — not flying");
+        break;
+    case CMD_HOME_LAND:
+        if (s_phase == MISSION_FLYING) {
+            s_phase = MISSION_BUSY; /* gate new movement immediately */
+            s_home_land_requested = true;
+        }
+        break;
     case CMD_LAND:
         if (s_phase == MISSION_READY) {
             ESP_LOGW(TAG, "CMD_LAND ignored — not flying");
@@ -183,6 +196,7 @@ static void handle_command(const wifi_cmd_pkt_t *cmd)
         s_land_requested = true;
         break;
     case CMD_HOLD:
+        if (s_phase == MISSION_BUSY) s_hold_requested = true;
         nav_cancel();
         ESP_LOGI(TAG, "CMD_HOLD");
         break;
@@ -515,6 +529,11 @@ void wifi_clear_land_request(void)
 {
     s_land_requested = false;
 }
+
+bool wifi_home_land_requested(void) { return s_home_land_requested; }
+void wifi_clear_home_land_request(void) { s_home_land_requested = false; }
+bool wifi_hold_requested(void) { return s_hold_requested; }
+void wifi_clear_hold_request(void) { s_hold_requested = false; }
 
 bool wifi_start_requested(void)
 {

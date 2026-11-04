@@ -19,17 +19,11 @@ Same as send_trajectory.py, plus:
 Needs flight_log.py, plot_trajectory.py, tag_logger.py, tag_snapshots.py in
 the same folder.
 
-The turn. During a trajectory the ESP32 holds the heading it had when the
-trajectory started, so the turn happens between the passes with ordinary GOTO
-commands: short hops, each aimed 90 degrees past where the nose points,
-curving toward the middle of the room (the return CSV says which way),
-stopped with HOLD once the nose points back (within 20 degrees). The drone drifts ~0.3 m doing this, so pass 2 starts with a slow glide
-to exactly where it should begin. The path itself never depends on the
-heading: an imperfect turn only changes which way the camera looks.
-Try it on its own first:  --turn-test  (take off, turn, land). With this
-firmware the nose only turns while the drone moves toward a GOTO goal, so a
-slow-turning drone drifts more (up to 1 m, toward the middle of the room) and
-may stop short of 180. If the test says so, fly with --no-turn instead.
+The turn holds XYZ in the updated ESP32 firmware and follows a gradual yaw
+profile to the fixed reverse heading. The firmware corrects residual heading
+error at that target; pass 2 requires settled-heading confirmation. Old firmware
+without CMD_TURN support is rejected. --turn-test exercises takeoff/turn/land;
+--no-turn retains the original camera heading intentionally.
 
 CSV: columns t,x,y,z (s, NED m); a header row and '#' comments are allowed.
 A trajectory is flown relative to where the drone hovers when it starts.
@@ -47,13 +41,13 @@ from pathlib import Path
 import numpy as np
 
 from comms import CommsNode
+from turn_control import run_turn
+from launch_alignment import wait_launch_alignment
 from flight_log import FlightLogger
 from protocol import (
-    CMD_GOTO,
     CMD_HOLD,
     CMD_LAND,
     CMD_START,
-    NAV_ARRIVED,
     NAV_TRAJ,
     TRAJ_MAX_PTS,
     CommandPacket,
@@ -71,10 +65,6 @@ log = logging.getLogger("send_trajectory")
 UPLOAD_GAP_S = 0.025   # ESP drains commands at 10 Hz from a 6-packet UDP queue
 PLOT_SCRIPT = Path(__file__).with_name("plot_trajectory.py")
 
-TURN_STEP_DEG = 90.0   # each hop aims this far past where the nose points
-TURN_HOP_M = 0.40      # GOTO this far ahead in the new direction (arrives at 0.25)
-TURN_MAX_DRIFT_M = 1.0 # stop turning if the drone has wandered this far
-TURN_MAX_HOPS = 15     # give up after this many hops
 GLIDE_SPEED = 0.10     # m/s, peak speed of the glide into pass 2
 GLIDE_MAX_M = 1.2      # refuse to glide further than this (something went wrong)
 
@@ -180,7 +170,7 @@ def main() -> None:
                     help="Refuse faster trajectories (m/s); keep below MAV_CMD_SPEED_CAP_MS")
     ap.add_argument("--takeoff", action="store_true", help="Send CMD_START (arm + take off) first")
     ap.add_argument("--takeoff-wait", type=float, default=8.0,
-                    help="Seconds from CMD_START to trajectory upload")
+                    help="Minimum post-START wait; launch XY verification is also required")
     ap.add_argument("--finish", choices=["land", "hold"], default="land",
                     help="Action after the trajectory")
     ap.add_argument("--confirm", action="store_true",
@@ -224,6 +214,7 @@ def main() -> None:
     def on_telemetry(pkt, _ip):
         if pkt.drone_id == args.drone_id:
             latest["pkt"] = pkt
+            latest["sample"] = (pkt, time.monotonic())
 
     def wait_for(cond, timeout_s: float) -> bool:
         deadline = time.monotonic() + timeout_s
@@ -262,50 +253,13 @@ def main() -> None:
             time.sleep(1.0)
         log.info("%s ended, nav state %s", name, latest["pkt"].nav_state_name)
 
-    def turn_around(direction: str) -> None:
-        """Turn 180 deg with short GOTO hops, then HOLD. See the module docstring.
-
-        The firmware flies at a GOTO goal while turning to face it and stops
-        turning when it arrives (0.25 m), so each hop only turns the nose part
-        of the way. Each hop therefore aims TURN_STEP_DEG past where the nose
-        points now (never past the target), until it faces back."""
-        p0 = latest["pkt"]
-        x0, y0, psi0 = p0.ned_x, p0.ned_y, p0.heading_rad
-        target = psi0 + math.pi
-        k_dir = 1.0 if direction == "right" else -1.0      # NED heading grows clockwise
-        log.info("turning 180 deg to the %s (heading %.0f -> %.0f deg)", direction,
-                 math.degrees(psi0) % 360, math.degrees(target) % 360)
-        turned = 0.0                                        # progress so far (rad)
-        for k in range(1, TURN_MAX_HOPS + 1):
-            p = latest["pkt"]
-            turned = k_dir * math.remainder(p.heading_rad - psi0, 2 * math.pi)
-            if turned < -0.5:                               # wrapped past 180
-                turned += 2 * math.pi
-            if math.pi - turned < math.radians(20):
-                break
-            theta = psi0 + k_dir * min(turned + math.radians(TURN_STEP_DEG), math.pi)
-            gx = p.ned_x + TURN_HOP_M * math.cos(theta)
-            gy = p.ned_y + TURN_HOP_M * math.sin(theta)
-            send(CMD_GOTO, f"turn hop {k} (nose {math.degrees(turned):.0f} deg round)", gx, gy)
-            if not wait_for(lambda q: q.nav_state != NAV_ARRIVED, 1.5):
-                send(CMD_GOTO, "turn hop (resend)", gx, gy)
-                wait_for(lambda q: q.nav_state != NAV_ARRIVED, 1.5)
-            wait_for(lambda q: q.nav_state == NAV_ARRIVED
-                     or abs(math.remainder(q.heading_rad - theta, 2 * math.pi)) < math.radians(10),
-                     6.0)
-            q = latest["pkt"]
-            drift = math.hypot(q.ned_x - x0, q.ned_y - y0)
-            if drift > TURN_MAX_DRIFT_M:
-                log.warning("turn: drifted %.2f m, stopping the turn here", drift)
-                break
-        send(CMD_HOLD, "CMD_HOLD (end of turn)")
-        time.sleep(2.5)                     # settle; let a fresh 1 Hz position arrive
-        q = latest["pkt"]
-        err = math.degrees(abs(math.remainder(q.heading_rad - target, 2 * math.pi)))
-        drift = math.hypot(q.ned_x - x0, q.ned_y - y0)
-        (log.info if err < 25 else log.warning)(
-            "turn done: heading %.0f deg (%.0f deg off a full 180), drifted %.2f m",
-            math.degrees(q.heading_rad) % 360, err, drift)
+    def turn_around(direction: str, forward_heading=None) -> None:
+        p = latest["pkt"]
+        target = (p.heading_rad if forward_heading is None else forward_heading) + math.pi
+        log.info("holding position and turning %s to %.1f deg", direction,
+                 math.degrees(target) % 360)
+        run_turn(lambda: latest["sample"], send, target, direction)
+        log.info("reverse heading aligned and settled")
 
     comms = CommsNode(
         listen_port=args.telem_port,
@@ -375,12 +329,14 @@ def main() -> None:
         if args.takeoff:
             send(CMD_START, "CMD_START")
             flying = True
-            time.sleep(args.takeoff_wait)
+            wait_launch_alignment(lambda: latest["sample"], min_wait=args.takeoff_wait)
+            log.info("takeoff position verified against pre-arm launch XY")
 
         if args.turn_test:
             turn_around(turn)
         else:
             p = latest["pkt"]
+            forward_heading = p.heading_rad
             org1 = np.array([p.ned_x, p.ned_y, 0.0])   # pass 1 is flown from here
             play(pts1, "pass 1")
             if pts2 is not None:
@@ -388,7 +344,7 @@ def main() -> None:
                     send(CMD_HOLD, "CMD_HOLD (no turn)")
                     time.sleep(2.5)
                 else:
-                    turn_around(turn)
+                    turn_around(turn, forward_heading)
                 p = latest["pkt"]
                 delta = org1 + start2 - np.array([p.ned_x, p.ned_y, 0.0])
                 delta[2] = 0.0
@@ -401,8 +357,8 @@ def main() -> None:
                 play(up2, "pass 2")
 
         if args.finish == "land":
-            for _ in range(3):   # UDP: repeat LAND
-                send(CMD_LAND, "CMD_LAND")
+            wait_launch_alignment(lambda: latest["sample"], landing=True, send=send)
+            log.info("launch XY verified; firmware starting normal landing")
         else:
             send(CMD_HOLD, "CMD_HOLD")
     except (Exception, KeyboardInterrupt):

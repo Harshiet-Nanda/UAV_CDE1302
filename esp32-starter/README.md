@@ -260,3 +260,103 @@ The height panel retains its place in the layout but explicitly states that the
 current firmware supplies no height; it draws no invented height trace.
 CSV logging and tag snapshot/localization behavior remain as on `kaiwei`.
 Changes are local and uncommitted; no hardware operation was performed.
+
+
+## Gradual turnaround before the reverse snake
+
+On local `harshiet`, based on `kaiwei` (4 November 2026), `send_trajectory_logged.py` now uses a
+position-holding firmware turn before `--return-trajectory`. Build and flash
+the updated ESP32 firmware before using this feature; older firmware does not
+understand `CMD_TURN` and the script aborts rather than using GOTO hops.
+The normal mission arguments and CSVs are unchanged. `--no-turn` explicitly
+skips the turn and keeps the original camera direction.
+
+The firmware holds the captured local NED X/Y/Z, waits for low translational
+speed for one second, then changes yaw along a quintic profile with zero
+initial/final commanded speed and acceleration. Initial limits in
+`main/turn_profile.h` are **20 deg/s** and **10 deg/s²**; the 180-degree profile
+lasts about **16.9 seconds**, plus braking and settling. These are commanded
+profile limits, not guarantees on measured vehicle motion. `--turn left|right`
+(or return-CSV metadata) chooses the rotation direction.
+
+The target is the first pass's starting heading plus 180 degrees, independent
+of intermediate overshoot. At the end of the profile the firmware continues
+holding that fixed yaw so PX4 corrects residual error. Completion requires
+heading error <=5 degrees, measured yaw speed <=5 deg/s, translational speed
+<=0.10 m/s, horizontal/vertical position errors <=0.15 m, for one second.
+The laptop additionally requires one second of fresh aligned `TURN_DONE`
+telemetry. Trajectory start rechecks alignment and retains the intended target
+yaw, rather than capturing residual heading error. The existing slow glide
+to the return CSV's start is preserved.
+
+A turn exceeding 45 seconds, 0.5 m horizontal drift, 0.3 m vertical drift,
+or losing fresh PX4 telemetry/Offboard/armed state is marked failed. The laptop
+requires a TURN acknowledgement within three seconds and fresh telemetry
+within 0.5 seconds; it will not launch the reverse pass on failure. It sends
+HOLD on turn abort, then the mission runner's existing exception handler sends
+LAND when it considers the flight active. The existing RC/mode takeover
+behaviour in the mission firmware remains applicable.
+
+For a supervised turn-only check after flashing (this command arms/takes off):
+
+```sh
+python laptop/send_trajectory_logged.py --drone-id 7 --turn-test --turn left --confirm --takeoff-wait 15
+```
+
+Software checks cover profile speed/acceleration, angle wraparound, overshoot
+correction, completion gating, duplicate requests, interruption and failures.
+No hardware turn or flight has been performed by the agent; validate these
+initial limits on the actual vehicle before using a full coverage mission.
+
+
+## Verify launch X/Y after takeoff and before normal landing
+
+Local `harshiet`, based on `kaiwei`, 4 November 2026: the firmware saves the disarmed local NED X/Y
+immediately before requesting Offboard/arming. This reference is captured anew
+for every START; it is not assumed to be (0,0), and is not recaptured after
+arming drift or after the flight. Takeoff holds that X/Y. After reaching the
+existing cruise-altitude target, the firmware checks measured X/Y, slowly
+corrects toward the saved reference and requires position/speed to settle before
+accepting laptop navigation. A takeoff timeout now blocks mission readiness
+instead of allowing an unsuccessful takeoff to enter laptop control.
+
+For normal completion, `send_trajectory_logged.py` and `waypoint_logged.py`
+send **CMD_HOME_LAND (0x0B)**. This immediately gates further movement requests,
+cancels navigation, checks actual X/Y against the same pre-arm reference and
+corrects horizontally at the current altitude. Only verified alignment permits
+the normal PX4 LAND request. The existing reverse snake ends at its start in
+its CSV; this step corrects residual flight error. It is a bounded drift
+correction, not a general return route from elsewhere in the arena.
+
+Initial settings in `main/xy_recovery.h`:
+
+- Horizontal error <= **0.10 m** (Euclidean X/Y distance).
+- Total speed <= **0.10 m/s** and altitude within **0.15 m**, for **one second**
+  using fresh position samples.
+- Quintic correction profile: commanded speed <= **0.10 m/s**, acceleration
+  <= **0.05 m/s²**. Hold heading and altitude during the correction.
+- Maximum home error **1.0 m** and timeout **30 s** for each correction. Excess
+  error, stale data, loss of Wi-Fi/flight mode or excess altitude error blocks
+  normal completion. Firmware reports failure and holds for LAND/pilot action.
+
+**CMD_LAND (0x02) remains immediate, in-place landing.** It overrides recovery
+and is still used by abort/exception handlers; an abort may therefore land away
+from the launch position. HOLD stops an active recovery. RC mode takeover is
+respected. Older lab clients that send CMD_LAND directly retain immediate
+landing behaviour; use the updated logged clients for verified normal landing.
+
+The logged clients now watch fresh TAKEOFF_ALIGN -> FLIGHT_READY status rather
+than relying on a blind sleep (`--takeoff-wait` is a minimum delay). Normal
+landing requires HOME_ALIGN -> HOME_READY acknowledgement. A correction failure
+or timeout aborts the logged mission; its existing fallback sends immediate
+LAND. The CSV logger records these state names. The firmware serial log prints
+the saved launch coordinates, measured coordinates, horizontal error and
+successful settling. States 9..13 are appended without changing telemetry size.
+
+Build/flash the updated ESP32 firmware and run the updated laptop code together.
+Software tests simulate pre-arm drift, takeoff recovery, normal landing,
+non-convergence, stale position samples, lost links and immediate LAND override.
+No hardware flight has been performed. This checks PX4's estimated local
+position, not an independent physical reference: estimator drift and drift during
+the subsequent PX4 descent can still change the physical touchdown location.
+The inherited absolute takeoff Z target (-0.5 m local NED) is unchanged.

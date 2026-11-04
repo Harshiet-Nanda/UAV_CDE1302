@@ -8,6 +8,8 @@
 #include "at_detect.h"
 #include "wifi_task.h"
 #include "odom.h"
+#include "xy_recovery.h"
+#include "esp_timer.h"
 
 #include <math.h>
 
@@ -27,8 +29,84 @@ static bool land_requested(void)
 {
     if (!wifi_land_requested()) return false;
     wifi_clear_land_request();
+    wifi_clear_home_land_request();
+    wifi_clear_hold_request();
     ESP_LOGI(TAG, "CMD_LAND received from laptop");
     return true;
+}
+
+/* Fresh local position/attitude and heartbeat are required for recovery. */
+static bool recovery_telemetry_valid(drone_state_t st)
+{
+    uint32_t ms=(uint32_t)(esp_timer_get_time()/1000);
+    return mavlink_position_valid() && (uint32_t)(ms-st.last_att_ms)<500
+        && (uint32_t)(ms-st.last_hb_ms)<1500
+        && isfinite(st.x) && isfinite(st.y) && isfinite(st.z)
+        && isfinite(st.heading) && isfinite(st.vx) && isfinite(st.vy) && isfinite(st.vz);
+}
+
+typedef enum { XY_DONE, XY_FAILED, XY_LAND_NOW, XY_RELEASED } xy_result_t;
+
+/* Captured launch coordinates are immutable for this flight. Recovery uses a
+ * slow interpolated position target, then waits for measured position/speed. */
+static xy_result_t recover_launch_xy(float home_x, float home_y, float hold_z,
+                                      nav_state_t status)
+{
+    drone_state_t start=mavlink_get_state();
+    float distance=hypotf(start.x-home_x,start.y-home_y);
+    nav_cancel();
+    nav_set_mission_status(status,distance);
+    ESP_LOGI(TAG, "XY check: actual(%.3f,%.3f), launch(%.3f,%.3f), error=%.3f m",
+             start.x,start.y,home_x,home_y,distance);
+    if (!recovery_telemetry_valid(start) || !isfinite(hold_z)
+        || distance>XY_RECOVERY_MAX_M) return XY_FAILED;
+    float duration=xy_recovery_duration(distance);
+    int64_t begin=esp_timer_get_time(), settled=0;
+    uint32_t last_pos_ms=start.last_pos_ms;
+    while ((esp_timer_get_time()-begin)*1e-6f<XY_RECOVERY_TIMEOUT_S) {
+        if (land_requested()) return XY_LAND_NOW;
+        if (wifi_hold_requested()) return XY_FAILED;
+        drone_state_t st=mavlink_get_state();
+        if (!st.armed || st.custom_main_mode!=PX4_MAIN_MODE_OFFBOARD) return XY_RELEASED;
+        if (!wifi_is_connected() || !recovery_telemetry_valid(st)
+            || hypotf(st.x-home_x,st.y-home_y)>XY_RECOVERY_MAX_M
+            || fabsf(st.z-hold_z)>0.3f) return XY_FAILED;
+        int64_t now=esp_timer_get_time();
+        float elapsed=(now-begin)*1e-6f;
+        float h=xy_recovery_fraction(elapsed,duration);
+        mavlink_set_position_ned(start.x+h*(home_x-start.x),
+                                 start.y+h*(home_y-start.y),hold_z,start.heading);
+        float error=hypotf(st.x-home_x,st.y-home_y);
+        nav_set_mission_status(status,error);
+        bool aligned=elapsed>=duration && xy_recovery_settled(st.x,st.y,st.z,
+                        st.vx,st.vy,st.vz,home_x,home_y,hold_z);
+        if (!aligned) settled=0;
+        else if (st.last_pos_ms!=last_pos_ms) {
+            if (!settled) settled=now;
+            if (now-settled>=XY_RECOVERY_SETTLE_US) {
+                ESP_LOGI(TAG,"Launch XY restored and settled: error=%.3f m",error);
+                return XY_DONE;
+            }
+        }
+        last_pos_ms=st.last_pos_ms;
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    return XY_FAILED;
+}
+
+/* Do not silently continue the mission or claim a home landing on failure.
+ * Immediate LAND and RC takeover remain available while recovery is stopped. */
+static void hold_failed_recovery(void)
+{
+    nav_cancel();
+    mavlink_set_hold();
+    nav_set_mission_status(NAV_ALIGN_FAILED,0.0f);
+    ESP_LOGE(TAG,"XY recovery failed: holding; immediate LAND or pilot action required");
+    while (mavlink_get_state().armed
+           && mavlink_get_state().custom_main_mode==PX4_MAIN_MODE_OFFBOARD) {
+        if (land_requested()) break;
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
 }
 
 /* ---------------------------------------------------------------------------
@@ -40,6 +118,7 @@ static void mission_task(void *arg)
     float target_z   = -(CRUISE_ALT_M);   /* NED: negative = above ground */
     float takeoff_x  = 0.0f;
     float takeoff_y  = 0.0f;
+    float takeoff_heading = 0.0f;
 
     for (;;) {
 
@@ -63,6 +142,8 @@ static void mission_task(void *arg)
     nav_cancel();                 /* drop stale goal + commands */
     wifi_clear_start_request();
     wifi_clear_land_request();
+    wifi_clear_home_land_request();
+    wifi_clear_hold_request();
     wifi_set_mission_phase(MISSION_READY);
     ESP_LOGI(TAG, "Pre-streaming hold setpoint for 2 s...");
     vTaskDelay(pdMS_TO_TICKS(2000));
@@ -98,6 +179,16 @@ static void mission_task(void *arg)
     /* Phase 3: OFFBOARD, then arm — retry every 500 ms.                   */
     /* CMD_LAND or ARM_TIMEOUT_S aborts and returns to waiting.            */
     /* ------------------------------------------------------------------ */
+    drone_state_t launch=mavlink_get_state();
+    if (!recovery_telemetry_valid(launch) || launch.armed) {
+        ESP_LOGW(TAG,"START refused: need fresh telemetry and disarmed launch reference");
+        continue;
+    }
+    takeoff_x=launch.x;
+    takeoff_y=launch.y;
+    takeoff_heading=launch.heading;
+    ESP_LOGI(TAG,"Saved pre-arm launch XY=(%.3f,%.3f)",takeoff_x,takeoff_y);
+
     const char *abort_why = NULL;
     int tries = ARM_TIMEOUT_S * 2;
 
@@ -125,57 +216,59 @@ static void mission_task(void *arg)
     }
     ESP_LOGI(TAG, "Armed confirmed");
 
-    /* ------------------------------------------------------------------ */
-    /* Phase 4: Take off (mission_task owns the setpoint); CMD_LAND lands  */
-    /* ------------------------------------------------------------------ */
-    {
-        drone_state_t st = mavlink_get_state();
-        takeoff_x = st.x;
-        takeoff_y = st.y;
-        mavlink_set_position_ned(takeoff_x, takeoff_y, target_z, st.heading);
-    }
-    ESP_LOGI(TAG, "Taking off to %.1f m AGL (NED z=%.2f)...", CRUISE_ALT_M, target_z);
-
-    bool land_now = false;
-    for (int i = 0; i < TAKEOFF_TIMEOUT_S * 10 && !land_now; i++) {
-        drone_state_t st = mavlink_get_state();
-        if (!st.armed || fabsf(st.z - target_z) < ALT_TOLERANCE_M) break;
-        land_now = land_requested();
+    /* Phase 4: vertical takeoff at the immutable pre-arm launch XY. */
+    nav_set_mission_status(NAV_TAKEOFF_ALIGN,0.0f);
+    mavlink_set_position_ned(takeoff_x,takeoff_y,target_z,takeoff_heading);
+    ESP_LOGI(TAG,"Taking off: launch XY=(%.3f,%.3f), NED z=%.2f",
+             takeoff_x,takeoff_y,target_z);
+    bool land_now=false, altitude_reached=false;
+    for (int i=0;i<TAKEOFF_TIMEOUT_S*10;i++) {
+        drone_state_t st=mavlink_get_state();
+        if (land_requested()) { land_now=true; break; }
+        if (wifi_hold_requested()) break;
+        if (!st.armed || st.custom_main_mode!=PX4_MAIN_MODE_OFFBOARD) break;
+        if (recovery_telemetry_valid(st) && fabsf(st.z-target_z)<ALT_TOLERANCE_M) {
+            altitude_reached=true; break;
+        }
         vTaskDelay(pdMS_TO_TICKS(100));
     }
+    xy_result_t takeoff_result=XY_RELEASED;
+    if (!land_now && altitude_reached)
+        takeoff_result=recover_launch_xy(takeoff_x,takeoff_y,target_z,NAV_TAKEOFF_ALIGN);
+    else if (!land_now && mavlink_get_state().armed
+             && mavlink_get_state().custom_main_mode==PX4_MAIN_MODE_OFFBOARD)
+        takeoff_result=XY_FAILED;
+    if (takeoff_result==XY_LAND_NOW) land_now=true;
+    if (takeoff_result==XY_FAILED) hold_failed_recovery();
 
-    bool armed = mavlink_get_state().armed;
-    if (!armed) ESP_LOGW(TAG, "Disarmed without CMD_LAND");
-
-    /* ------------------------------------------------------------------ */
-    /* Phase 5: Laptop control (GOTO / HOLD / trajectory) until LAND      */
-    /* ------------------------------------------------------------------ */
-    if (!land_now && armed) {
-        float z = mavlink_get_state().z;
-        if (fabsf(z - target_z) < ALT_TOLERANCE_M) {
-            ESP_LOGI(TAG, "Altitude reached: NED z=%.2f (target=%.2f)", z, target_z);
-        } else {
-            ESP_LOGW(TAG, "Takeoff timeout: NED z=%.2f (target=%.2f)", z, target_z);
-        }
-        vTaskDelay(pdMS_TO_TICKS(1000));
-
+    /* Phase 5: accept laptop movement only once launch XY/altitude settle. */
+    bool normal_home_land=false;
+    if (!land_now && takeoff_result==XY_DONE) {
+        nav_set_mission_status(NAV_FLIGHT_READY,0.0f);
         wifi_set_mission_phase(MISSION_FLYING);
-        ESP_LOGI(TAG, "Exploration mode — waiting for laptop goals...");
-        while (!land_requested()) {
-            if (!mavlink_get_state().armed) {   /* landed by RC / QGC */
-                ESP_LOGW(TAG, "Disarmed without CMD_LAND");
-                break;
-            }
-            vTaskDelay(pdMS_TO_TICKS(200));
+        ESP_LOGI(TAG,"Takeoff XY verified — ready for laptop mission");
+        while (1) {
+            if (land_requested()) { land_now=true; break; }
+            if (wifi_home_land_requested()) { normal_home_land=true; break; }
+            if (!mavlink_get_state().armed
+                || mavlink_get_state().custom_main_mode!=PX4_MAIN_MODE_OFFBOARD) break;
+            vTaskDelay(pdMS_TO_TICKS(100));
         }
-        wifi_set_mission_phase(MISSION_BUSY);
+    }
+    wifi_set_mission_phase(MISSION_BUSY);
+    wifi_clear_home_land_request();
+    if (normal_home_land && !land_now) {
+        float landing_z=mavlink_get_state().z; /* correct XY at current altitude */
+        xy_result_t result=recover_launch_xy(takeoff_x,takeoff_y,landing_z,NAV_HOME_ALIGN);
+        if (result==XY_DONE) nav_set_mission_status(NAV_HOME_READY,0.0f);
+        else if (result==XY_FAILED) hold_failed_recovery();
     }
 
     /* ------------------------------------------------------------------ */
     /* Phase 6: Land, wait for disarm.  LAND is (re)sent every 2 s only    */
     /* while in OFFBOARD, so an RC takeover is never overridden.           */
     /* ------------------------------------------------------------------ */
-    nav_cancel();
+    if (nav_get_status().state != NAV_HOME_READY) nav_cancel();
     for (int i = 0; mavlink_get_state().armed; i++) {
         bool offboard = mavlink_get_state().custom_main_mode == PX4_MAIN_MODE_OFFBOARD;
         if (i % 20 == 0 && offboard) {

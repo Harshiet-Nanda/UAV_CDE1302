@@ -51,7 +51,7 @@ Report: at most 10 pages including cover/appendices, excluding source code; sing
 
 The inherited architecture notes overstate active obstacle navigation: `TOF_ENABLED=0`, `collision_avoid()` immediately returns false, and GOTO sends direct PX4 position targets without VFH steering or peer-obstacle injection. Blocked-bin feedback remains clear, which limits the older exploration director. MAVLink setpoints and navigation run at 20 Hz; telemetry runs at 10 Hz. The 0.10 m/s navigation constant does not constrain direct-position GOTO.
 
-The firmware waits for START, enters Offboard, arms, targets local NED z=-0.5, then accepts laptop goals/trajectories until LAND. A takeoff timeout can still enter the flying phase while armed. LAND does not itself return to launch. Access-point loss cancels active navigation and attempts ordinary disarm after three seconds; it does not detect a dead laptop process, and cancellation is a no-op without active navigation.
+The firmware waits for START, enters Offboard, arms, targets local NED z=-0.5, then accepts laptop goals/trajectories until LAND. The inherited code allowed takeoff timeout to enter the flying phase; the local 4 November recovery update now requires successful altitude/XY settling. Immediate CMD_LAND does not return to launch; the new normal CMD_HOME_LAND checks/corrects launch XY first. Access-point loss cancels active navigation and attempts ordinary disarm after three seconds; it does not detect a dead laptop process, and cancellation is a no-op without active navigation.
 
 Telemetry provides map XY and heading, but no altitude, roll/pitch, armed/mode status or pose timestamp. One protocol test expects absent PX4 status fields; this mismatch was found by inspection, without running tests. Onboard telemetry latches one claimed tag until reboot; live debug/video detections are separate. No software execution, build, installation or hardware validation was performed during this review.
 
@@ -65,3 +65,45 @@ tables removed. Map/reference paths/localized tags/heading and navigation/stuck
 events remain; height is explicitly unavailable. Only laptop GUI/camera integration
 and documentation change: firmware, protocol.py and flight_log.py match kaiwei.
 Existing local sdkconfig edits, esp-idf/ and build-kaiwei/ are preserved.
+
+
+## Gradual reverse-snake turn — 4 November 2026
+
+Implemented on `harshiet`, based on `kaiwei`: CMD_TURN (0x0A) uses the existing 22-byte
+command layout (goal_x = absolute NED yaw radians, goal_y = +1 right/-1 left).
+Telemetry packet size remains unchanged; appended states are TURN=6,
+TURN_DONE=7, TURN_FAILED=8. The firmware holds XYZ, brakes translation, uses a
+quintic yaw profile limited to 20 deg/s and 10 deg/s², then holds the intended
+target for residual correction. Heading/yaw-rate/position/speed settling checks
+and laptop fresh-state acknowledgement gate the return trajectory. The return
+target is first-pass heading +180 degrees; playback keeps that exact yaw.
+Drift, stale telemetry, mode loss or timeout block the reverse pass; laptop
+turn errors send HOLD then follow the existing active-flight LAND policy.
+Old firmware is rejected without movement-hop fallback. Flashing is required;
+no flash or flight was performed. See the starter README for thresholds and
+the supervised turn-only command. Existing telemetry-status test failure is
+reproducible using unchanged HEAD protocol.py and predates this change.
+
+
+## Launch XY drift recovery — 4 November 2026
+
+The implementation on harshiet, based on kaiwei, extends the previous gradual-turn
+work. main.c captures the disarmed PX4 local X/Y before Offboard/arming and
+uses the immutable reference after takeoff and before normal landing. Measured
+horizontal distance <=0.10 m, altitude error <=0.15 m and total speed <=0.10 m/s
+must persist for one second with fresh position updates. Quintic position
+correction is limited to 0.10 m/s and 0.05 m/s²; maximum home error is 1 m and
+correction timeout 30 s. Larger discrepancies require intervention rather than
+an unplanned cross-arena return. The existing absolute takeoff Z is unchanged.
+
+CMD_HOME_LAND=0x0B is used for normal finish by send_trajectory_logged.py and
+waypoint_logged.py. CMD_LAND remains an immediate in-place override and the
+logged clients retain it for aborts. Firmware alignment failure holds for
+intervention; client failure handling then requests immediate LAND. New nav
+states 9..13 expose takeoff alignment, flight readiness, home alignment,
+verified home readiness and failure using the unchanged packet layout. Fresh
+acknowledgements replace blind post-START sleeps. Legacy lab clients sending
+CMD_LAND directly still land immediately. Serial logs contain home/error
+values; CSV state names show alignment transitions. This compensates measured
+position drift only; no independent physical-position/touchdown guarantee.
+No flashing or physical flight tests were performed.
