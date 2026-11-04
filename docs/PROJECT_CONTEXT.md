@@ -56,3 +56,12 @@ The firmware waits for START, enters Offboard, arms, targets local NED z=-0.5, t
 Telemetry provides map XY and heading, but no altitude, roll/pitch, armed/mode status or pose timestamp. One protocol test expects absent PX4 status fields; this mismatch was found by inspection, without running tests. Onboard telemetry latches one claimed tag until reboot; live debug/video detections are separate. No software execution, build, installation or hardware validation was performed during this review.
 
 The added `laptop/tag_stream_unprocessed.py` viewer displays/prints camera-in-marker tvec (metres) and Rodrigues rvec (radians), obtained by inverting the detector pose (R.T, -R.T @ t), with tag outlines and a terminal-only option. It retains the existing detector calibration/gate and applies no body/local transform or smoothing. Offline synthetic checks passed for translation preservation, rotation-vector conversion, missing pose and overlay rendering; CLI help passed. Live video/hardware remains untested.
+
+## Legacy-firmware GUI — 2 November 2026
+
+The local `gui2` branch was created directly from `kaiwei` (`605980a`). It carries
+the styled `gui` dashboard and shared camera preview, with all extended field/value
+tables removed. Map/reference paths/localized tags/heading and navigation/stuck
+events remain; height is explicitly unavailable. Only laptop GUI/camera integration
+and documentation change: firmware, protocol.py and flight_log.py match kaiwei.
+Existing local sdkconfig edits, esp-idf/ and build-kaiwei/ are preserved.

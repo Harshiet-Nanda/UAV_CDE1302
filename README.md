@@ -29,3 +29,10 @@ Raw Canvas API responses, signed download links, credentials and personal submis
 ## Pull-request automation
 
 CDE1302-specific PR-Agent configuration is installed for Gemini descriptions, reviews, suggestions and automatic changelog/version entries. See [setup, behavior and validation](docs/PR_AUTOMATION.md). The workflow is enabled on main; final AI/changelog validation is pending recovery from Gemini 503 high-demand errors.
+
+## Legacy-firmware GUI
+
+The local `gui2` branch starts from `kaiwei` and retains the styled flight map,
+AprilTag camera and event log, with unsupported telemetry tables removed and
+height marked unavailable. Firmware and its telemetry protocol remain unchanged.
+See the [dashboard notes](esp32-starter/README.md#legacy-firmware-dashboard-gui2-branch).

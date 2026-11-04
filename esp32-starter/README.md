@@ -241,3 +241,22 @@ python3 laptop/send_trajectory.py --takeoff --takeoff-wait 12 \
 `--confirm` asks for `TRAJ-[drone ID]` before anything is sent.
 
 See `trajectory/README.md` for the included circle and compact minimum-snap ellipse, how to regenerate their CSV files, and the space each path needs.
+
+## Legacy-firmware dashboard (`gui2` branch)
+
+`gui2` is based on `kaiwei` and carries the styled GUI from `gui` without the
+extended telemetry tables. The original firmware, `protocol.py` and `flight_log.py`
+are unchanged. No firmware rebuild or flash is needed for this GUI update.
+
+The existing logged mission launchers still open the dashboard automatically.
+It preserves the north-up, time-coloured flight map, heading, planned waypoint/
+trajectory overlay and localized tag markers. The shared camera preview displays
+quality-gated host AprilTag outlines/IDs. Camera preview requires snapshots enabled
+and no other program holding UDP 5009. The separate event panel shows connection
+freshness and recent navigation/stuck events from the original telemetry.
+
+IMU, velocity, battery, arming/mode and heartbeat-age field/value tables are removed.
+The height panel retains its place in the layout but explicitly states that the
+current firmware supplies no height; it draws no invented height trace.
+CSV logging and tag snapshot/localization behavior remain as on `kaiwei`.
+Changes are local and uncommitted; no hardware operation was performed.
