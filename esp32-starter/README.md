@@ -364,3 +364,16 @@ No hardware flight has been performed. This checks PX4's estimated local
 position, not an independent physical reference: estimator drift and drift during
 the subsequent PX4 descent can still change the physical touchdown location.
 The inherited absolute takeoff Z target (-0.5 m local NED) is unchanged.
+
+
+## Alignment reception gaps — 5 November 2026
+
+On harshiet, the laptop no longer aborts takeoff/home-landing alignment merely
+because telemetry is more than 0.5 seconds old. It waits for newly received
+alignment states, retaining the 55-second overall limit, 3-second home-command
+acknowledgement limit, explicit firmware failure/interruption checks and minimum
+takeoff wait. An old READY packet cannot advance the mission after a receive gap.
+This is a laptop-only change: no ESP32 reflash. Turn-specific freshness checks,
+waypoint travel timeout and firmware PX4 freshness requirements are unchanged.
+A lost link can now delay the alignment abort until the remaining limit expires;
+this does not repair the underlying telemetry gap.

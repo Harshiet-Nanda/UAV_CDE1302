@@ -53,7 +53,7 @@ def test_minimum_takeoff_delay_keeps_watching_telemetry():
     assert f.t >= 3
 
 
-@pytest.mark.parametrize('problem,match', [('stale','telemetry lost'),
+@pytest.mark.parametrize('problem,match', [('stale','timed out'),
     ('failed','correction failed'), ('interrupted','interrupted'), ('timeout','timed out')])
 def test_takeoff_cannot_start_path_on_failure(problem, match):
     def scenario(t):
@@ -62,6 +62,34 @@ def test_takeoff_cannot_start_path_on_failure(problem, match):
                 'interrupted':(0,t), 'timeout':(NAV_TAKEOFF_ALIGN,t)}[problem]
     f=Flight(scenario)
     with pytest.raises(RuntimeError,match=match): f.wait(timeout=3)
+
+
+@pytest.mark.parametrize('landing', [False, True])
+def test_receive_gap_does_not_abort_alignment(landing):
+    active, done = (NAV_HOME_ALIGN, NAV_HOME_READY) if landing else (NAV_TAKEOFF_ALIGN, NAV_FLIGHT_READY)
+    def scenario(t):
+        if t < 1:
+            return active, t
+        if t < 6:
+            return active, 0.95  # five seconds without a new packet
+        return done, t
+    f = Flight(scenario)
+    assert f.wait(landing=landing, timeout=8).nav_state == done
+    assert f.t >= 6
+
+
+@pytest.mark.parametrize('landing', [False, True])
+def test_old_ready_packet_cannot_complete_during_receive_gap(landing):
+    active, done = (NAV_HOME_ALIGN, NAV_HOME_READY) if landing else (NAV_TAKEOFF_ALIGN, NAV_FLIGHT_READY)
+    def scenario(t):
+        if t < 0.5:
+            return active, t
+        if t < 1:
+            return done, t
+        return done, 0.95
+    f = Flight(scenario)
+    with pytest.raises(RuntimeError, match='timed out'):
+        f.wait(landing=landing, min_wait=2, timeout=4)
 
 
 def test_old_firmware_or_old_ready_state_cannot_complete_landing():

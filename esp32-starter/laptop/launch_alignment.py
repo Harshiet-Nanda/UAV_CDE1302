@@ -11,6 +11,8 @@ def wait_launch_alignment(get_sample, *, landing=False, send=None, min_wait=0.0,
 
     Called immediately after START, or sends HOME_LAND itself for normal finish.
     min_wait replaces the old blind post-START sleep while still watching state.
+    Receive gaps do not abort this wait; only newly received samples may advance
+    alignment. The overall timeout and explicit firmware failures still apply.
     """
     active = NAV_HOME_ALIGN if landing else NAV_TAKEOFF_ALIGN
     done = NAV_HOME_READY if landing else NAV_FLIGHT_READY
@@ -21,8 +23,6 @@ def wait_launch_alignment(get_sample, *, landing=False, send=None, min_wait=0.0,
     while clock()-started < timeout:
         now = clock()
         packet, received = get_sample()
-        if now-received > 0.5:
-            raise RuntimeError("telemetry lost during launch XY alignment")
         if received > last_received:
             last_received = received
             if packet.nav_state == NAV_ALIGN_FAILED:
