@@ -107,3 +107,8 @@ CMD_LAND directly still land immediately. Serial logs contain home/error
 values; CSV state names show alignment transitions. This compensates measured
 position drift only; no independent physical-position/touchdown guarantee.
 No flashing or physical flight tests were performed.
+
+
+## Firmware flash — 5 November 2026
+
+5 November 2026: built and flashed harshiet c91b369 for drone 7 on /dev/ttyACM0 (ESP32-S3 MAC e8:f6:0a:8b:ba:d0), using pinned ESP-IDF 08e0d30a74ad0bfd5a34933142b80f45619ee410. Generated header verified ID 7, ESP32 192.168.1.207, host 192.168.1.107, gateway 192.168.1.1 and /24 mask. Full build/link passed; esptool verified written hashes and reset the device. Startup log confirms the new app boots, but TP-Link_E95A connection repeatedly fails; Wi-Fi initialization blocks further task startup, so telemetry/camera/PX4 connectivity and flight behavior remain unverified. No flight commands sent. Branch matches origin/harshiet after fetch; no source/config changes or push. The committed flash_drone.sh still uses the outer Git root and nonportable mktemp calls despite earlier guide claims; used the equivalent idf.py build, generated-header checks and idf.py -p /dev/ttyACM0 flash directly from esp32-starter. Existing sdkconfig already contained ID 7 and remained unchanged. Build logs are in esp32-starter/build/log; boot log retained at esp32-starter/logs/flash-20261105-group7-boot.log. Application binary SHA256: 32836b566ce6755492a74b2f64d252cd49e8a6a22e2293ec83b112bf4fd2b66c.

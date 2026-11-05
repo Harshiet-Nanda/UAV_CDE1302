@@ -43,7 +43,7 @@ See the [dashboard notes](esp32-starter/README.md#legacy-firmware-dashboard-gui2
 Local `harshiet` (based on `kaiwei`) now implements a position-holding gradual yaw turn, correction
 and settled-heading gate before the reverse snake. It requires updated ESP32
 firmware. See [turnaround setup, limits and validation](esp32-starter/README.md#gradual-turnaround-before-the-reverse-snake).
-The change has software validation only; hardware testing remains pending.
+Built and flashed for drone 7 on 5 November 2026; boot confirmed. Wi-Fi connection and supervised flight validation remain pending.
 
 
 ## Launch-position checks
@@ -52,5 +52,5 @@ The local firmware also saves pre-arm X/Y, corrects drift after takeoff, and
 verifies/corrects that same X/Y before normal landing with the updated logged
 snake/waypoint clients. Initial tolerance is 10 cm; immediate abort landing stays
 available. See [launch-position recovery](esp32-starter/README.md#verify-launch-xy-after-takeoff-and-before-normal-landing)
-for limits, failure handling and required firmware update. Hardware validation
-remains pending.
+for limits and failure handling. Firmware flashed on 5 November 2026;
+supervised flight validation remains pending.
