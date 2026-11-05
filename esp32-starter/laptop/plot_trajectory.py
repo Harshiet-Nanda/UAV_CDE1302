@@ -27,15 +27,14 @@ circle showing the spread of its sightings. --tags points at another file.
 Axes: east (y) to the right, north (x) up, like a map seen from above.
 Positions are shifted so the first one is (0, 0); --absolute shows PX4's raw values.
 Left panel: path coloured by time, start ●, current/end ▲ with heading.
-Other panels: live camera with quality-gated AprilTag outlines, measured height,
-and recent navigation/stuck events. Extended telemetry tables are omitted. Camera preview
-is shared by SnapshotSaver; this process does not bind camera or command ports.
-Height = -PX4 local NED z, not a rangefinder measurement. Missing values stay blank.
-This gui2 dashboard uses the original kaiwei firmware and CSV protocol unchanged.
+Other panels: onboard AprilTag results and recent navigation/stuck events.
+The GUI reads compact ESP32 detections; it never requests video or detects tags
+on the laptop. Height remains unavailable with legacy telemetry.
 """
 
 import argparse
 import csv
+import json
 from collections import deque
 import math
 import sys
@@ -154,16 +153,14 @@ class TrajectoryPlot:
         self.fig.suptitle(title, color="#ecf3ff", fontsize=16, fontweight="bold")
         self.fig.subplots_adjust(top=0.90, bottom=0.09, left=0.055, right=0.98)
         self.ax_map.set_title("FLIGHT MAP  ·  North ↑", fontweight="bold", pad=12)
-        self.ax_camera.set_title("CAMERA  ·  AprilTag scanner", fontweight="bold", pad=12)
+        self.ax_camera.set_title("APRILTAGS  ·  ESP32 detector", fontweight="bold", pad=12)
         self.ax_camera.set_axis_off()
-        self.camera_image = self.ax_camera.imshow(np.zeros((240, 320, 3), dtype=np.uint8))
-        self.camera_note = self.ax_camera.text(
-            0.02, 0.98, "Waiting for camera / snapshot receiver", color="white",
-            va="top", transform=self.ax_camera.transAxes, fontsize=9,
-            bbox=dict(fc="#101827", alpha=0.85, ec="none"))
-        self.preview_path = None
+        self.detection_note = self.ax_camera.text(
+            0.02, 0.98, "Waiting for onboard detection data", color="#d7e4f6",
+            va="top", transform=self.ax_camera.transAxes, fontsize=10,
+            linespacing=1.6)
+        self.detections_path = None
         self.live = False
-        self._preview_stamp = None
         self.height_line, = self.ax_height.plot([], [], color="#47d7c5", lw=2)
         self.ax_height.set_title("HEIGHT  ·  above PX4 local origin", fontweight="bold", pad=12)
         self.ax_height.set_xlabel("Elapsed time (s)")
@@ -221,7 +218,7 @@ class TrajectoryPlot:
             text.set_fontsize(text._dashboard_fontsize * scale)
 
     def update(self, d: LogTail) -> None:
-        self.update_camera()
+        self.update_detections()
         if not d.t:
             self._fit_text()
             return
@@ -321,25 +318,31 @@ class TrajectoryPlot:
         except (TypeError, ValueError):
             return float("nan")
 
-    def update_camera(self):
-        if not self.preview_path:
+    def update_detections(self):
+        """Display the latest ESP32 result, including empty frames and freshness."""
+        if not self.detections_path:
             return
-        path = Path(self.preview_path)
         try:
-            stamp = path.stat().st_mtime_ns
-            if stamp != self._preview_stamp:
-                image = plt.imread(path)
-                self.camera_image.set_data(image)
-                self.camera_image.set_extent((-0.5, image.shape[1] - 0.5,
-                                              image.shape[0] - 0.5, -0.5))
-                self.ax_camera.set_xlim(-0.5, image.shape[1] - 0.5)
-                self.ax_camera.set_ylim(image.shape[0] - 0.5, -0.5)
-                self._preview_stamp = stamp
-            age = max(0, time.time() - path.stat().st_mtime)
-            self.camera_note.set_text(f"{'LIVE' if age < 2 else 'STALE'} · frame age {age:.1f}s")
-        except (OSError, ValueError):
-            self.camera_note.set_text("Camera unavailable · enable snapshots; close other camera viewers")
-
+            status = json.loads(Path(self.detections_path).read_text())
+            age = max(0.0, time.time() - status["received_at"])
+            state = ("LIVE" if age < 2 else "STALE") if self.live else "LAST RECORDED"
+            lines = [f"{state} · received {age:.1f}s ago",
+                     f"ESP32 processing: {status['proc_ms']} ms",
+                     "Camera video off · detection on ESP32", "",
+                     "Tag relative to camera (metres)",
+                     "X right · Y down · Z forward"]
+            for d in status["detections"]:
+                if d["pose_err"] >= 0:
+                    lines.append(f"T{d['id']}: ({d['tx']:+.2f}, {d['ty']:+.2f}, {d['tz']:+.2f})")
+                else:
+                    lines.append(f"T{d['id']}: rejected by detector quality gate")
+            if not status["detections"]:
+                lines.append("No AprilTags in latest onboard result")
+            self.detection_note.set_text("\n".join(lines))
+        except (OSError, ValueError, KeyError, TypeError):
+            self.detection_note.set_text(
+                "Onboard detections unavailable\nWaiting for UDP 5008 results\n"
+                "Camera video off · no laptop detection")
 
     def _draw_tags(self, d: LogTail) -> tuple[list, list]:
         """Draw tag sightings and fused estimates; returns extents for limits."""
@@ -416,7 +419,7 @@ def main() -> int:
     ap.add_argument("--no-tags", action="store_true",
                     help="With --listen: don't log AprilTag detections (UDP 5008)")
     ap.add_argument("--no-snaps", action="store_true",
-                    help="With --listen: don't save camera pictures of detections")
+                    help="Compatibility option; camera streaming and snapshots are always off")
     ap.add_argument("--absolute", action="store_true",
                     help="Plot raw positions. Default: the first position is (0, 0)")
     args = ap.parse_args()
@@ -426,7 +429,7 @@ def main() -> int:
 
     ref = load_reference(args.ref) if args.ref else None
 
-    comms = flog = tags = snaps = None
+    comms = flog = tags = None
     if args.listen:
         # Imported here so --file works without the rest of laptop/ on the path
         sys.path.insert(0, str(Path(__file__).parent))
@@ -441,14 +444,6 @@ def main() -> int:
                 poses = PoseHistory(args.drone_id)
                 comms.on_telemetry(poses.feed)
                 tags = TagLogger(flog.path, args.drone_id, poses, t0=flog.t0)
-                if not args.no_snaps:
-                    from tag_snapshots import SnapshotSaver
-                    snaps = SnapshotSaver(flog.path, args.drone_id, comms, t0=flog.t0,
-                                          origin_fn=tags._origin)
-                    if snaps.start():
-                        tags.on_place = snaps.on_detection
-                    else:
-                        snaps = None
                 if not tags.start():
                     tags = None
             except Exception as exc:
@@ -466,7 +461,7 @@ def main() -> int:
         title += "  [start = (0, 0)]"
     plot = TrajectoryPlot(title, ref)
     plot.live = live
-    plot.preview_path = str(Path(path).with_suffix("")) + "_snaps/preview.jpg"
+    plot.detections_path = str(Path(path).with_suffix("")) + "_detections.json"
     plot.tags_path = args.tags or str(Path(path).with_suffix("")) + "_tags.csv"
 
     try:
@@ -495,8 +490,6 @@ def main() -> int:
             flog.close()
         if tags:
             tags.close()
-        if snaps:
-            snaps.close()
     return 0
 
 

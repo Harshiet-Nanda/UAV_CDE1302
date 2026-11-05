@@ -242,24 +242,28 @@ python3 laptop/send_trajectory.py --takeoff --takeoff-wait 12 \
 
 See `trajectory/README.md` for the included circle and compact minimum-snap ellipse, how to regenerate their CSV files, and the space each path needs.
 
-## Legacy-firmware dashboard (`gui2` branch)
+## Onboard-only detection dashboard (`harshiet`, 5 November 2026)
 
-`gui2` is based on `kaiwei` and carries the styled GUI from `gui` without the
-extended telemetry tables. The original firmware, `protocol.py` and `flight_log.py`
-are unchanged. No firmware rebuild or flash is needed for this GUI update.
+On `harshiet`, the trajectory and waypoint logged launchers and standalone
+`plot_trajectory.py --listen --drone-id 7` now consume only the ESP32 AprilTag
+results on UDP 5008. They never start SnapshotSaver, request camera frames, or
+instantiate the laptop detector. The previous camera panel shows onboard IDs,
+camera-relative tvec values, processing time and fresh/stale status instead.
+Existing tag map placement/fusion and CSV summaries remain laptop geometry on
+ESP32 measurements, not laptop image detection. Waypoint runs now log these
+onboard detections too. The small status sidecar `<flight>_detections.json`
+includes empty results so old tags clear from the panel. `--no-snaps` remains a
+compatibility option; video and image snapshots are always off in these flows.
 
-The existing logged mission launchers still open the dashboard automatically.
-It preserves the north-up, time-coloured flight map, heading, planned waypoint/
-trajectory overlay and localized tag markers. The shared camera preview displays
-quality-gated host AprilTag outlines/IDs. Camera preview requires snapshots enabled
-and no other program holding UDP 5009. The separate event panel shows connection
-freshness and recent navigation/stuck events from the original telemetry.
-
-IMU, velocity, battery, arming/mode and heartbeat-age field/value tables are removed.
-The height panel retains its place in the layout but explicitly states that the
-current firmware supplies no height; it draws no invented height trace.
-CSV logging and tag snapshot/localization behavior remain as on `kaiwei`.
-Changes are local and uncommitted; no hardware operation was performed.
+No firmware change/reflash is required. Close separately launched camera/tag
+viewers or older mission processes: those can still request video and run their
+own laptop detector. Without keepalives the existing firmware stops video after
+2.5 seconds. Small detection packets, telemetry, MAVLink and mission commands
+still cross Wi-Fi. At most eight detections fit an existing 251-byte payload,
+sent at 10 Hz (up to 2.51 KB/s of detection payload, excluding network overhead).
+No guarantee of Wi-Fi or flight performance is implied. Onboard pose has no
+transmitted rotation; existing floor-height, yaw-only transform and timing
+assumptions remain. Image snapshots/preview are no longer collected by the GUI.
 
 
 ## Gradual turnaround before the reverse snake

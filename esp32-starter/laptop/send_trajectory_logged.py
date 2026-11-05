@@ -11,12 +11,12 @@ Same as send_trajectory.py, plus:
   - every telemetry packet -> logs/flight_<time>.csv, live plot, PNG at the end
   - AprilTags the drone sees -> logs/flight_<time>_tags.csv / _tag_summary.csv,
     drawn on the plot (tag_logger.py; --no-tags turns it off)
-  - a picture of every detection -> logs/flight_<time>_snaps/ (tag_snapshots.py;
-    --no-snaps turns the camera stream off)
+  - onboard detection status -> logs/flight_<time>_detections.json
+    No camera streaming, snapshots or laptop image detection.
   - --return-trajectory: after the first pass the drone turns 180 degrees and
     flies the second CSV (written by coverage_min_snap.py), lined up with the
     first pass, then lands.
-Needs flight_log.py, plot_trajectory.py, tag_logger.py, tag_snapshots.py in
+Needs flight_log.py, plot_trajectory.py, tag_logger.py in
 the same folder.
 
 The turn holds XYZ in the updated ESP32 firmware and follows a gradual yaw
@@ -179,7 +179,7 @@ def main() -> None:
                     help="Don't open the live plot window (CSV log and PNG are still saved)")
     ap.add_argument("--no-tags", action="store_true", help="Don't log AprilTag detections")
     ap.add_argument("--no-snaps", action="store_true",
-                    help="Don't stream the camera or save pictures of detections")
+                    help="Compatibility option; camera streaming and snapshots are always off")
     ap.add_argument("--altitude", type=float, default=0.5,
                     help="Assumed flying height (m) for checking tag sightings")
     ap.add_argument("--telem-port", type=int, default=5005)
@@ -284,8 +284,8 @@ def main() -> None:
         for r in rows or [(0.0, 0, 0, 0), (1.0, 0, 0, 0)]:
             fh.write(f"{r[0]:.3f},{r[1]:.4f},{r[2]:.4f},{r[3]:.4f}\n")
 
-    # AprilTags + pictures (optional; never block the flight)
-    tags = snaps = None
+    # Onboard AprilTag results only (optional; never block the flight)
+    tags = None
     if not args.no_tags:
         try:
             from tag_logger import PoseHistory, TagLogger
@@ -293,14 +293,6 @@ def main() -> None:
             comms.on_telemetry(poses.feed)
             tags = TagLogger(flog.path, args.drone_id, poses, t0=flog.t0,
                              altitude=args.altitude)
-            if not args.no_snaps:
-                from tag_snapshots import SnapshotSaver
-                snaps = SnapshotSaver(flog.path, args.drone_id, comms, t0=flog.t0,
-                                      origin_fn=tags._origin)
-                if snaps.start():
-                    tags.on_place = snaps.on_detection
-                else:
-                    snaps = None
             if not tags.start():
                 tags = None
         except Exception as exc:
@@ -379,8 +371,6 @@ def main() -> None:
                 log.info("  tag %2d  x=%+.2f  y=%+.2f  (+/-%.2f m, %d sightings, %s)",
                          tid, f["x"] - ox, f["y"] - oy, f["spread"], f["frames"],
                          "confirmed" if f["confirmed"] else "UNCONFIRMED")
-        if snaps:
-            snaps.close()
         save_plot_png(flog.path, ref_path)
 
 

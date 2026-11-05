@@ -42,6 +42,7 @@ plot_trajectory.py shifts everything by the flight's start position.
 from __future__ import annotations
 
 import csv
+import json
 import math
 import socket
 import threading
@@ -221,6 +222,7 @@ class TagLogger:
                  port: int = AT_DEBUG_PORT, verbose: bool = True,
                  on_place=None) -> None:
         stem = Path(flight_log_path).with_suffix("")
+        self.status_path = Path(f"{stem}_detections.json")
         self.path = f"{stem}_tags.csv"
         self.summary_path = f"{stem}_tag_summary.csv"
         self.drone_id = drone_id
@@ -322,9 +324,24 @@ class TagLogger:
                         self._offset = off if self._offset is None else min(self._offset, off)
                         if pkt.frame_ms != self._last_frame:      # 10 Hz repeats
                             self._last_frame = pkt.frame_ms
+                            self._publish_status(pkt)
                             if pkt.detections:
                                 self._pending.append((now, pkt))
                 self._process()
+
+    def _publish_status(self, pkt) -> None:
+        """Share metadata with the GUI; no images or laptop detector involved."""
+        status = {"received_at": time.time(), "drone_id": pkt.drone_id,
+                  "frame_ms": pkt.frame_ms, "proc_ms": pkt.proc_ms,
+                  "raw_count": pkt.raw_count,
+                  "detections": [vars(d) for d in pkt.detections]}
+        temp = self.status_path.with_suffix(".tmp")
+        try:
+            temp.write_text(json.dumps(status))
+            temp.replace(self.status_path)
+        except OSError as exc:
+            # A GUI status write failure must not stop detection CSV logging.
+            print(f"[tags] onboard status unavailable: {exc}")
 
     def _process(self, flush: bool = False) -> None:
         now = time.monotonic()

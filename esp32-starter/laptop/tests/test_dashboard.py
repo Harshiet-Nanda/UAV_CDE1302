@@ -1,4 +1,4 @@
-"""Dashboard integration using original kaiwei telemetry and camera protocol."""
+"""Dashboard integration with legacy telemetry and onboard detection packets."""
 import csv
 import math
 import struct
@@ -54,29 +54,91 @@ def test_legacy_csv_and_partial_write(tmp_path):
     plt.close(plot.fig)
 
 
-def test_real_scanner_publishes_and_clears_overlay(tmp_path):
-    import cv2
-    from apriltag_host import Detector
-    from tag_snapshots import SnapshotSaver
-    if not hasattr(cv2, 'aruco'):
-        pytest.skip('OpenCV aruco unavailable')
-    saver = SnapshotSaver.__new__(SnapshotSaver)
-    saver.dir, saver._cv2, saver._np = tmp_path, cv2, np
-    dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_16h5)
-    gray = np.full((240, 320), 255, np.uint8)
-    gray[60:180, 100:220] = cv2.aruco.generateImageMarker(dictionary, 5, 120)
-    with Detector() as detector:
-        saver._detector = detector
-        saver._publish_preview(cv2.imencode('.jpg', gray)[1].tobytes())
-        image = cv2.imread(str(tmp_path/'preview.jpg'))
-        # Real detector draws a green outline around the recognised marker.
-        assert ((image[110:130, 195:205, 1].astype(int) - image[110:130, 195:205, 2]) > 80).any()
-        plot = TrajectoryPlot('Camera')
-        plot.preview_path = str(tmp_path/'preview.jpg')
-        plot.update_camera()
-        assert plot.camera_image.get_array().shape == (480, 640, 3)
-        saver._publish_preview(cv2.imencode('.jpg', np.full_like(gray, 255))[1].tobytes())
-        cleared = cv2.imread(str(tmp_path/'preview.jpg'))
-        assert cleared[120, 200, 0] > 240
-        assert not (tmp_path/'preview.tmp.jpg').exists()
+def test_onboard_results_reach_gui_without_host_detector(tmp_path, monkeypatch):
+    import json
+    import socket
+    import time
+    import apriltag_host
+    from tag_logger import PoseHistory, TagLogger
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Laptop detection must never run")
+    monkeypatch.setattr(apriltag_host, 'Detector', forbidden)
+    poses = PoseHistory(7)
+    telemetry = bytearray(packet())
+    telemetry[1] = 7
+    poses.feed(parse_telemetry(bytes(telemetry)))
+    logger = TagLogger(str(tmp_path/'flight.csv'), 7, poses, port=0, verbose=False)
+    assert logger.start()
+    plot = TrajectoryPlot('Onboard detection')
+    plot.live = True
+    plot.detections_path = logger.status_path
+    tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    address = ('127.0.0.1', logger._sock.getsockname()[1])
+
+    def send_and_wait(frame, count):
+        data = struct.pack('<BBIHbBB', 4, 7, frame, 120, -1, count, count)
+        if count:
+            data += struct.pack('<bB7f', 5, 0, 100., 160., 120., .1, .2, .5, .01)
+        tx.sendto(data, address)
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            try:
+                status = json.loads(logger.status_path.read_text())
+                if status['frame_ms'] == frame:
+                    return status
+            except (OSError, ValueError):
+                pass
+            time.sleep(.01)
+        pytest.fail('Onboard packet did not reach GUI status')
+
+    try:
+        status = send_and_wait(1000, 1)
+        assert status['detections'][0]['id'] == 5
+        plot.update_detections()
+        assert 'T5: (+0.10, +0.20, +0.50)' in plot.detection_note.get_text()
+        assert 'LIVE' in plot.detection_note.get_text()
+        send_and_wait(1200, 0)
+        plot.update_detections()
+        assert 'No AprilTags' in plot.detection_note.get_text()
+        assert 'T5:' not in plot.detection_note.get_text()
+        # Delay the recorded result to check that old sightings aren't called live.
+        status = json.loads(logger.status_path.read_text())
+        status['received_at'] = time.time() - 5
+        logger.status_path.write_text(json.dumps(status))
+        plot.update_detections()
+        assert 'STALE' in plot.detection_note.get_text()
+        assert not list(tmp_path.glob('*_snaps'))
+        assert not logger.status_path.with_suffix('.tmp').exists()
+        plot.fig.canvas.draw()
+        plot.fig.savefig(tmp_path/'onboard-dashboard.png')
+    finally:
+        tx.close()
+        logger.close()
         plt.close(plot.fig)
+    with open(logger.path, newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    assert len(rows) == 1 and rows[0]["tag_id"] == "5"
+    assert rows[0]["used"] == "1"
+    assert rows[0]["tag_x"] and rows[0]["tag_y"]
+
+
+def test_gui_and_mission_launchers_have_no_video_receiver():
+    # Catch reintroducing the implicit video/detection startup path.
+    import ast
+    root = Path(__file__).resolve().parents[1]
+    for filename in ('send_trajectory_logged.py', 'waypoint_logged.py', 'plot_trajectory.py'):
+        tree = ast.parse((root/filename).read_text())
+        imports = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+        assert not imports.intersection({'tag_snapshots', 'camera_stream', 'tag_stream'})
+        assert not any(isinstance(node, ast.Name) and node.id in {'Detector', 'SnapshotSaver'}
+                       for node in ast.walk(tree))
+
+
+def test_missing_onboard_status_is_explicit(tmp_path):
+    plot = TrajectoryPlot('Missing')
+    plot.detections_path = tmp_path/'missing.json'
+    plot.update_detections()
+    assert 'unavailable' in plot.detection_note.get_text()
+    assert 'no laptop detection' in plot.detection_note.get_text()
+    plt.close(plot.fig)
