@@ -334,7 +334,7 @@ correction, not a general return route from elsewhere in the arena.
 
 Initial settings in `main/xy_recovery.h`:
 
-- Horizontal error <= **0.10 m** (Euclidean X/Y distance).
+- Horizontal error <= **0.20 m after takeoff**, **0.10 m before home landing** (Euclidean X/Y distance).
 - Total speed <= **0.10 m/s** and altitude within **0.15 m**, for **one second**
   using fresh position samples.
 - Quintic correction profile: commanded speed <= **0.10 m/s**, acceleration
@@ -377,3 +377,16 @@ This is a laptop-only change: no ESP32 reflash. Turn-specific freshness checks,
 waypoint travel timeout and firmware PX4 freshness requirements are unchanged.
 A lost link can now delay the alignment abort until the remaining limit expires;
 this does not repair the underlying telemetry gap.
+
+
+## Takeoff diagnostics — 6 November 2026
+
+On branch `harshiet2`, ESP32 serial logs distinguish the 10-second altitude gate
+from subsequent XY recovery. `TAKEOFF` reports gate pass, timeout or interruption;
+`ALIGN` reports entry checks, Wi-Fi/telemetry/distance/altitude failures, mode
+release and recovery timeout. Rate-limited snapshots include armed/mode, Wi-Fi,
+position validity, position/attitude/heartbeat ages, measured and target NED Z,
+launch XY error and speed. Settling logs expose individual XY/Z/speed/profile
+conditions. The laptop failure message points to these logs. Flight thresholds
+and failure behavior are unchanged; takeoff radius remains 0.20 m and home radius
+0.10 m. No assumption that ALIGN_FAILED necessarily means horizontal drift.

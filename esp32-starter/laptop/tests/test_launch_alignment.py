@@ -108,6 +108,7 @@ def test_xy_profile_and_actual_recovery_with_mocked_vehicle(tmp_path):
         return source[start:end]
     harness=r"""
 #include <stdint.h>
+#include <stddef.h>
 #include <assert.h>
 #include "xy_recovery.h"
 #define PX4_MAIN_MODE_OFFBOARD 6
@@ -159,6 +160,7 @@ static void vTaskDelay(int ms){
 """
     harness+=function('static bool land_requested(void)')
     harness+=function('static bool recovery_telemetry_valid(drone_state_t st)')
+    harness+=function('static void log_alignment_snapshot(')
     harness+='typedef enum { XY_DONE, XY_FAILED, XY_LAND_NOW, XY_RELEASED } xy_result_t;\n'
     harness+=function('static xy_result_t recover_launch_xy(')
     harness+=r"""
@@ -186,6 +188,10 @@ int main(void){
  reset();mode=3;assert(recover_launch_xy(3,-2,-0.5f,NAV_HOME_ALIGN)==XY_RELEASED);
  reset();mode=4;assert(recover_launch_xy(3,-2,-0.5f,NAV_HOME_ALIGN)==XY_FAILED);
  // Within position tolerance but still moving is not settled.
+ assert(xy_recovery_settled_with_radius(3.15f,-2,-0.5f,0,0,0,3,-2,-0.5f,TAKEOFF_ALIGNMENT_TOL_M));
+ assert(!xy_recovery_settled_with_radius(3.21f,-2,-0.5f,0,0,0,3,-2,-0.5f,TAKEOFF_ALIGNMENT_TOL_M));
+ assert(!xy_recovery_settled(3.15f,-2,-0.5f,0,0,0,3,-2,-0.5f));
+ assert(!xy_recovery_settled_with_radius(3,-2,-0.5f,0.2f,0,0,3,-2,-0.5f,TAKEOFF_ALIGNMENT_TOL_M));
  assert(!xy_recovery_settled(3,-2,-0.5f,0.2f,0,0,3,-2,-0.5f));
  assert(!xy_recovery_settled(3,-2,-0.1f,0,0,0,3,-2,-0.5f));
  assert(!xy_recovery_settled(NAN,-2,-0.5f,0,0,0,3,-2,-0.5f));
@@ -294,18 +300,19 @@ static void vTaskDelay(int ms){
  if(phase==MISSION_READY)start_request=true;
  if(vehicle.armed){
   if(!(scenario==2 || (scenario==3 && flight_ready))){vehicle.x=cmd_x;vehicle.y=cmd_y;}
-  vehicle.z=cmd_z;
+  vehicle.z=scenario==5 ? 0.0f : cmd_z;
   if(first_climb && !injected){vehicle.x=home_x+0.3f;vehicle.y=home_y+0.2f;injected=true;}
   if(scenario==4 && home_active)land_request=true;
  }
  vehicle.last_pos_ms=vehicle.last_att_ms=vehicle.last_hb_ms=now_us/1000;
+ if(scenario==6 && vehicle.armed)vehicle.last_att_ms=0;
  assert(now_us<150000000);
 }
 """
     harness+=mission
     harness+=r"""
 int main(void){
- for(scenario=0;scenario<5;scenario++){
+ for(scenario=0;scenario<7;scenario++){
   now_us=1000000;state=phase=ready_count=land_calls=0;
   start_request=land_request=home_request=hold_request=false;
   injected=first_climb=flight_ready=home_ready=failed=home_active=false;
@@ -319,6 +326,7 @@ int main(void){
   if(scenario==2)assert(!flight_ready && failed);
   if(scenario==3)assert(flight_ready && failed && !home_ready);
   if(scenario==4)assert(flight_ready && home_active && !home_ready && !failed);
+  if(scenario==5 || scenario==6)assert(!flight_ready && failed && !home_active);
  }
  return 0;
 }
@@ -329,3 +337,11 @@ int main(void){
                     '-Wno-unused-parameter','-Wno-unused-variable',
                     '-I',str(main),str(cfile),'-lm','-o',str(binary)],check=True)
     subprocess.run([str(binary)],check=True)
+
+
+def test_alignment_failure_points_to_altitude_and_serial_diagnostics():
+    f = Flight(lambda t: (NAV_TAKEOFF_ALIGN if t < 0.5 else NAV_ALIGN_FAILED, t))
+    with pytest.raises(RuntimeError) as exc:
+        f.wait()
+    assert "ESP32 serial TAKEOFF/ALIGN" in str(exc.value)
+    assert "altitude gate" in str(exc.value)

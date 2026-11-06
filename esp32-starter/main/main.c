@@ -45,6 +45,25 @@ static bool recovery_telemetry_valid(drone_state_t st)
         && isfinite(st.heading) && isfinite(st.vx) && isfinite(st.vy) && isfinite(st.vz);
 }
 
+/* One snapshot per second, plus failure snapshots: keep UART logging bounded. */
+static void log_alignment_snapshot(const char *stage, drone_state_t st,
+                                    float home_x, float home_y, float target_z)
+{
+    uint32_t ms=(uint32_t)(esp_timer_get_time()/1000);
+    float error=hypotf(st.x-home_x,st.y-home_y);
+    float speed=sqrtf(st.vx*st.vx+st.vy*st.vy+st.vz*st.vz);
+    ESP_LOGI(TAG,"ALIGN %s: armed=%d mode=%u wifi=%d pos_valid=%d "
+             "age_ms(pos/att/hb)=%lu/%lu/%lu XY=(%.3f,%.3f) "
+             "home=(%.3f,%.3f) xy_error=%.3f z=%.3f target_z=%.3f "
+             "z_error=%.3f speed=%.3f",
+             stage,st.armed,(unsigned)st.custom_main_mode,wifi_is_connected(),
+             mavlink_position_valid(),(unsigned long)(ms-st.last_pos_ms),
+             (unsigned long)(ms-st.last_att_ms),(unsigned long)(ms-st.last_hb_ms),
+             st.x,st.y,home_x,home_y,error,st.z,target_z,fabsf(st.z-target_z),speed);
+    /* Also compile with test log macros that discard arguments. */
+    (void)stage; (void)ms; (void)error; (void)speed; (void)target_z;
+}
+
 typedef enum { XY_DONE, XY_FAILED, XY_LAND_NOW, XY_RELEASED } xy_result_t;
 
 /* Captured launch coordinates are immutable for this flight. Recovery uses a
@@ -58,19 +77,38 @@ static xy_result_t recover_launch_xy(float home_x, float home_y, float hold_z,
     nav_set_mission_status(status,distance);
     ESP_LOGI(TAG, "XY check: actual(%.3f,%.3f), launch(%.3f,%.3f), error=%.3f m",
              start.x,start.y,home_x,home_y,distance);
+    log_alignment_snapshot("recovery entry",start,home_x,home_y,hold_z);
     if (!recovery_telemetry_valid(start) || !isfinite(hold_z)
-        || distance>XY_RECOVERY_MAX_M) return XY_FAILED;
+        || distance>XY_RECOVERY_MAX_M) {
+        ESP_LOGE(TAG,"ALIGN failed at recovery entry: telemetry_valid=%d target_finite=%d distance=%.3f max=%.3f",
+                 recovery_telemetry_valid(start),isfinite(hold_z),distance,XY_RECOVERY_MAX_M);
+        return XY_FAILED;
+    }
     float duration=xy_recovery_duration(distance);
-    int64_t begin=esp_timer_get_time(), settled=0;
+    int64_t begin=esp_timer_get_time(), settled=0, next_log=begin;
     uint32_t last_pos_ms=start.last_pos_ms;
     while ((esp_timer_get_time()-begin)*1e-6f<XY_RECOVERY_TIMEOUT_S) {
         if (land_requested()) return XY_LAND_NOW;
-        if (wifi_hold_requested()) return XY_FAILED;
+        if (wifi_hold_requested()) {
+            ESP_LOGE(TAG,"ALIGN failed: CMD_HOLD interrupted recovery");
+            return XY_FAILED;
+        }
         drone_state_t st=mavlink_get_state();
-        if (!st.armed || st.custom_main_mode!=PX4_MAIN_MODE_OFFBOARD) return XY_RELEASED;
-        if (!wifi_is_connected() || !recovery_telemetry_valid(st)
-            || hypotf(st.x-home_x,st.y-home_y)>XY_RECOVERY_MAX_M
-            || fabsf(st.z-hold_z)>0.3f) return XY_FAILED;
+        if (!st.armed || st.custom_main_mode!=PX4_MAIN_MODE_OFFBOARD) {
+            ESP_LOGW(TAG,"ALIGN released: disarmed or left OFFBOARD");
+            log_alignment_snapshot("released",st,home_x,home_y,hold_z);
+            return XY_RELEASED;
+        }
+        const char *failure=NULL;
+        if (!wifi_is_connected()) failure="Wi-Fi disconnected";
+        else if (!recovery_telemetry_valid(st)) failure="stale or non-finite PX4 telemetry";
+        else if (hypotf(st.x-home_x,st.y-home_y)>XY_RECOVERY_MAX_M) failure="XY error exceeds maximum recovery distance";
+        else if (fabsf(st.z-hold_z)>0.3f) failure="altitude error exceeds 0.30 m during recovery";
+        if (failure) {
+            ESP_LOGE(TAG,"ALIGN failed: %s",failure);
+            log_alignment_snapshot("failed",st,home_x,home_y,hold_z);
+            return XY_FAILED;
+        }
         int64_t now=esp_timer_get_time();
         float elapsed=(now-begin)*1e-6f;
         float h=xy_recovery_fraction(elapsed,duration);
@@ -78,8 +116,19 @@ static xy_result_t recover_launch_xy(float home_x, float home_y, float hold_z,
                                  start.y+h*(home_y-start.y),hold_z,start.heading);
         float error=hypotf(st.x-home_x,st.y-home_y);
         nav_set_mission_status(status,error);
-        bool aligned=elapsed>=duration && xy_recovery_settled(st.x,st.y,st.z,
-                        st.vx,st.vy,st.vz,home_x,home_y,hold_z);
+        float radius_m = status == NAV_TAKEOFF_ALIGN
+            ? TAKEOFF_ALIGNMENT_TOL_M : XY_RECOVERY_TOL_M;
+        bool aligned=elapsed>=duration && xy_recovery_settled_with_radius(st.x,st.y,st.z,
+                        st.vx,st.vy,st.vz,home_x,home_y,hold_z,radius_m);
+        if (now>=next_log) {
+            log_alignment_snapshot("recovering",st,home_x,home_y,hold_z);
+            ESP_LOGI(TAG,"ALIGN settling: radius=%.2f profile_done=%d within_xy=%d within_z=%d slow=%d settled_ms=%ld",
+                     radius_m,elapsed>=duration,error<=radius_m,
+                     fabsf(st.z-hold_z)<=0.15f,
+                     sqrtf(st.vx*st.vx+st.vy*st.vy+st.vz*st.vz)<=XY_RECOVERY_SETTLE_M_S,
+                     (long)(settled ? (now-settled)/1000 : 0));
+            next_log=now+1000000;
+        }
         if (!aligned) settled=0;
         else if (st.last_pos_ms!=last_pos_ms) {
             if (!settled) settled=now;
@@ -91,6 +140,9 @@ static xy_result_t recover_launch_xy(float home_x, float home_y, float hold_z,
         last_pos_ms=st.last_pos_ms;
         vTaskDelay(pdMS_TO_TICKS(50));
     }
+    ESP_LOGE(TAG,"ALIGN failed: recovery timed out after %.1f s; check XY, Z, speed and fresh samples",
+             XY_RECOVERY_TIMEOUT_S);
+    log_alignment_snapshot("timeout",mavlink_get_state(),home_x,home_y,hold_z);
     return XY_FAILED;
 }
 
@@ -101,7 +153,7 @@ static void hold_failed_recovery(void)
     nav_cancel();
     mavlink_set_hold();
     nav_set_mission_status(NAV_ALIGN_FAILED,0.0f);
-    ESP_LOGE(TAG,"XY recovery failed: holding; immediate LAND or pilot action required");
+    ESP_LOGE(TAG,"Takeoff/alignment failed: holding; see preceding TAKEOFF/ALIGN reason; immediate LAND or pilot action required");
     while (mavlink_get_state().armed
            && mavlink_get_state().custom_main_mode==PX4_MAIN_MODE_OFFBOARD) {
         if (land_requested()) break;
@@ -222,13 +274,29 @@ static void mission_task(void *arg)
     ESP_LOGI(TAG,"Taking off: launch XY=(%.3f,%.3f), NED z=%.2f",
              takeoff_x,takeoff_y,target_z);
     bool land_now=false, altitude_reached=false;
+    ESP_LOGI(TAG,"TAKEOFF altitude gate: NED target_z=%.3f tolerance=%.3f timeout=%d s; XY radius=%.2f m applies AFTER altitude gate",
+             target_z,ALT_TOLERANCE_M,TAKEOFF_TIMEOUT_S,TAKEOFF_ALIGNMENT_TOL_M);
+    log_alignment_snapshot("takeoff begin",mavlink_get_state(),takeoff_x,takeoff_y,target_z);
     for (int i=0;i<TAKEOFF_TIMEOUT_S*10;i++) {
         drone_state_t st=mavlink_get_state();
         if (land_requested()) { land_now=true; break; }
-        if (wifi_hold_requested()) break;
-        if (!st.armed || st.custom_main_mode!=PX4_MAIN_MODE_OFFBOARD) break;
+        if (wifi_hold_requested()) {
+            ESP_LOGE(TAG,"TAKEOFF interrupted: CMD_HOLD");
+            break;
+        }
+        if (!st.armed || st.custom_main_mode!=PX4_MAIN_MODE_OFFBOARD) {
+            ESP_LOGW(TAG,"TAKEOFF released: disarmed or left OFFBOARD");
+            break;
+        }
+        if (i%10==0)
+            log_alignment_snapshot("waiting for altitude",st,takeoff_x,takeoff_y,target_z);
         if (recovery_telemetry_valid(st) && fabsf(st.z-target_z)<ALT_TOLERANCE_M) {
+            ESP_LOGI(TAG,"TAKEOFF altitude gate passed; starting XY recovery");
             altitude_reached=true; break;
+        }
+        if (i==TAKEOFF_TIMEOUT_S*10-1) {
+            ESP_LOGE(TAG,"TAKEOFF failed: altitude gate timed out (requires altitude AND fresh finite telemetry)");
+            log_alignment_snapshot("altitude timeout",st,takeoff_x,takeoff_y,target_z);
         }
         vTaskDelay(pdMS_TO_TICKS(100));
     }

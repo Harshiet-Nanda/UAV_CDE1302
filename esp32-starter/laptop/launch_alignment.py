@@ -26,7 +26,10 @@ def wait_launch_alignment(get_sample, *, landing=False, send=None, min_wait=0.0,
         if received > last_received:
             last_received = received
             if packet.nav_state == NAV_ALIGN_FAILED:
-                raise RuntimeError("launch XY correction failed; normal mission/landing blocked")
+                raise RuntimeError("takeoff/home alignment correction failed (ALIGN_FAILED); mission blocked. "
+                                   "Read ESP32 serial TAKEOFF/ALIGN logs for altitude timeout, "
+                                   "telemetry ages, XY/Z/speed limits or CMD_HOLD. "
+                                   "Increasing XY radius does not change the altitude gate.")
             if packet.nav_state == active:
                 acknowledged = True
             if acknowledged and packet.nav_state == done and now-started >= min_wait:
