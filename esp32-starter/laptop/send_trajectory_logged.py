@@ -19,20 +19,10 @@ Same as send_trajectory.py, plus:
 Needs flight_log.py, plot_trajectory.py, tag_logger.py, tag_snapshots.py in
 the same folder.
 
-The turn. During a trajectory the ESP32 holds the heading it had when the
-trajectory started, so the turn happens between the passes with ordinary GOTO
-commands: short hops, each aimed 90 degrees past where the nose points,
-curving toward the middle of the room (the return CSV says which way),
-stopped with HOLD once the nose points back (within 20 degrees). The drone drifts ~0.3 m doing this, so pass 2 starts with a slow glide
-to exactly where it should begin. The path itself never depends on the
-heading: an imperfect turn only changes which way the camera looks.
-Try it on its own first:  --turn-test  (take off, turn, land). With this
-firmware the nose only turns while the drone moves toward a GOTO goal, so a
-slow-turning drone drifts more (up to 1 m, toward the middle of the room) and
-may stop short of 180. If the test says so, fly with --no-turn instead.
-
-CSV: columns t,x,y,z (s, NED m); a header row and '#' comments are allowed.
-A trajectory is flown relative to where the drone hovers when it starts.
+The turn uses CMD_TURN: fixed position, 15 deg/s maximum yaw speed with
+10 deg/s² acceleration/deceleration. Requires updated ESP32 firmware.
+The return pass starts only after confirmed completion. --turn-test performs
+only takeoff, turn and landing; --no-turn skips rotation.
 """
 
 import argparse
@@ -71,10 +61,7 @@ log = logging.getLogger("send_trajectory")
 UPLOAD_GAP_S = 0.025   # ESP drains commands at 10 Hz from a 6-packet UDP queue
 PLOT_SCRIPT = Path(__file__).with_name("plot_trajectory.py")
 
-TURN_STEP_DEG = 90.0   # each hop aims this far past where the nose points
-TURN_HOP_M = 0.40      # GOTO this far ahead in the new direction (arrives at 0.25)
-TURN_MAX_DRIFT_M = 1.0 # stop turning if the drone has wandered this far
-TURN_MAX_HOPS = 15     # give up after this many hops
+
 GLIDE_SPEED = 0.10     # m/s, peak speed of the glide into pass 2
 GLIDE_MAX_M = 1.2      # refuse to glide further than this (something went wrong)
 
@@ -224,6 +211,7 @@ def main() -> None:
     def on_telemetry(pkt, _ip):
         if pkt.drone_id == args.drone_id:
             latest["pkt"] = pkt
+            latest["turn_snapshot"] = (pkt, time.monotonic())
 
     def wait_for(cond, timeout_s: float) -> bool:
         deadline = time.monotonic() + timeout_s
@@ -263,49 +251,15 @@ def main() -> None:
         log.info("%s ended, nav state %s", name, latest["pkt"].nav_state_name)
 
     def turn_around(direction: str) -> None:
-        """Turn 180 deg with short GOTO hops, then HOLD. See the module docstring.
+        from turn_in_place import turn_in_place
 
-        The firmware flies at a GOTO goal while turning to face it and stops
-        turning when it arrives (0.25 m), so each hop only turns the nose part
-        of the way. Each hop therefore aims TURN_STEP_DEG past where the nose
-        points now (never past the target), until it faces back."""
-        p0 = latest["pkt"]
-        x0, y0, psi0 = p0.ned_x, p0.ned_y, p0.heading_rad
-        target = psi0 + math.pi
-        k_dir = 1.0 if direction == "right" else -1.0      # NED heading grows clockwise
-        log.info("turning 180 deg to the %s (heading %.0f -> %.0f deg)", direction,
-                 math.degrees(psi0) % 360, math.degrees(target) % 360)
-        turned = 0.0                                        # progress so far (rad)
-        for k in range(1, TURN_MAX_HOPS + 1):
-            p = latest["pkt"]
-            turned = k_dir * math.remainder(p.heading_rad - psi0, 2 * math.pi)
-            if turned < -0.5:                               # wrapped past 180
-                turned += 2 * math.pi
-            if math.pi - turned < math.radians(20):
-                break
-            theta = psi0 + k_dir * min(turned + math.radians(TURN_STEP_DEG), math.pi)
-            gx = p.ned_x + TURN_HOP_M * math.cos(theta)
-            gy = p.ned_y + TURN_HOP_M * math.sin(theta)
-            send(CMD_GOTO, f"turn hop {k} (nose {math.degrees(turned):.0f} deg round)", gx, gy)
-            if not wait_for(lambda q: q.nav_state != NAV_ARRIVED, 1.5):
-                send(CMD_GOTO, "turn hop (resend)", gx, gy)
-                wait_for(lambda q: q.nav_state != NAV_ARRIVED, 1.5)
-            wait_for(lambda q: q.nav_state == NAV_ARRIVED
-                     or abs(math.remainder(q.heading_rad - theta, 2 * math.pi)) < math.radians(10),
-                     6.0)
-            q = latest["pkt"]
-            drift = math.hypot(q.ned_x - x0, q.ned_y - y0)
-            if drift > TURN_MAX_DRIFT_M:
-                log.warning("turn: drifted %.2f m, stopping the turn here", drift)
-                break
-        send(CMD_HOLD, "CMD_HOLD (end of turn)")
-        time.sleep(2.5)                     # settle; let a fresh 1 Hz position arrive
-        q = latest["pkt"]
-        err = math.degrees(abs(math.remainder(q.heading_rad - target, 2 * math.pi)))
-        drift = math.hypot(q.ned_x - x0, q.ned_y - y0)
-        (log.info if err < 25 else log.warning)(
-            "turn done: heading %.0f deg (%.0f deg off a full 180), drifted %.2f m",
-            math.degrees(q.heading_rad) % 360, err, drift)
+        def send_turn(command):
+            if not comms.send_command(args.drone_id, command):
+                raise RuntimeError("Turn not sent: drone IP unknown")
+
+        log.info("Turning 180 degrees %s in place", direction)
+        turn_in_place(direction, lambda: latest["turn_snapshot"], send_turn)
+        log.info("Turn complete; position and heading held")
 
     comms = CommsNode(
         listen_port=args.telem_port,

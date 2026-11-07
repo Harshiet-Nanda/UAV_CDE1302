@@ -37,6 +37,8 @@ typedef enum {
     NAV_ARRIVED,        /* within arrival radius — goal reached, hold commanded  */
     NAV_STUCK,          /* VFH fully blocked — holding, awaiting laptop rescue   */
     NAV_TRAJ,           /* playing an uploaded trajectory                        */
+    NAV_TURNING,        /* fixed position, profiled yaw */
+    NAV_TURN_FAILED,    /* turn rejected, timed out or interrupted by readiness */
 } nav_state_t;
 
 /* ---------------------------------------------------------------------------
@@ -93,3 +95,6 @@ void nav_traj_start(uint8_t id, uint16_t dt_ms);
 
 /* Thread-safe status snapshot. */
 nav_status_t nav_get_status(void);
+
+/* Absolute NED yaw, signed rad/s (positive=right). Retries are idempotent. */
+void nav_turn_start(float target_yaw, float signed_speed);

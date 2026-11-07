@@ -174,12 +174,20 @@ static void handle_command(const wifi_cmd_pkt_t *cmd)
         nav_set_goal_map(cmd->goal_x, cmd->goal_y, -(WIFI_CRUISE_ALT_M));
         ESP_LOGI(TAG, "CMD_GOTO map(%.2f,%.2f)", cmd->goal_x, cmd->goal_y);
         break;
+    case CMD_TURN:
+        if (s_phase != MISSION_FLYING) {
+            ESP_LOGW(TAG, "CMD_TURN ignored — not flying");
+            break;
+        }
+        nav_turn_start(cmd->goal_x, cmd->goal_y);
+        break;
     case CMD_LAND:
         if (s_phase == MISSION_READY) {
             ESP_LOGW(TAG, "CMD_LAND ignored — not flying");
             break;
         }
         ESP_LOGI(TAG, "CMD_LAND");
+        if (nav_get_status().state == NAV_TURNING) nav_cancel();
         s_land_requested = true;
         break;
     case CMD_HOLD:

@@ -234,8 +234,8 @@ See `trajectory/README.md` for the included circle and compact minimum-snap elli
 ## Legacy-firmware dashboard (`gui2` branch)
 
 `gui2` is based on `kaiwei` and carries the styled GUI from `gui` without the
-extended telemetry tables. The original firmware, `protocol.py` and `flight_log.py`
-are unchanged. No firmware rebuild or flash is needed for this GUI update.
+extended telemetry tables. The dashboard retains the original telemetry packet layout. The dedicated
+turn-in-place feature below requires matching updated laptop and ESP32 code.
 
 The existing logged mission launchers still open the dashboard automatically.
 It preserves the north-up, time-coloured flight map, heading, planned waypoint/
@@ -249,3 +249,34 @@ The height panel retains its place in the layout but explicitly states that the
 current firmware supplies no height; it draws no invented height trace.
 CSV logging and tag snapshot/localization behavior remain as on `kaiwei`.
 Changes are local and uncommitted; no hardware operation was performed.
+
+## Smooth turn in place
+
+The logged trajectory launcher now uses `CMD_TURN` instead of movement hops
+between snake passes. The ESP32 captures measured NED x/y/z once and holds
+those targets while profiling yaw at up to 15 degrees/s, with 10 degrees/s²
+acceleration/deceleration. PX4 uses the existing position/yaw MAVLink interface;
+no PX4 firmware changes are needed. Position hold can still drift physically.
+
+Use the existing `--turn left|right`, `--turn-test`, and `--no-turn` options.
+Snake CSVs and the glide to the return-pass start are unchanged. Rebuild and
+flash the updated ESP32 firmware before using a turn; older firmware will fail
+the laptop's acknowledgement wait and follow existing mission-abort handling.
+
+Wire format remains the 22-byte command: CMD_TURN=0x0A, goal_x=absolute yaw
+(radians), goal_y=signed maximum speed (rad/s; positive right, negative left).
+Firmware caps speed at 15 degrees/s. Navigation states add TURNING=6 and
+TURN_FAILED=7 without changing telemetry size. Identical retries do not restart
+a turn until another navigation/cancel command clears the previous request.
+
+Turns require the flying mission phase, armed Offboard and position younger
+than 500 ms. Loss of readiness or a 30 s deadline stops yaw progression and
+uses existing hold handling. Completion requires the profile to finish and
+measured yaw within 5 degrees for 1 s; final position and yaw stay commanded.
+HOLD, LAND, new navigation and existing Wi-Fi handling can cancel a turn.
+The laptop requires TURNING acknowledgement and fresh completion telemetry;
+its 3 s stale threshold matches the waypoint launcher's default. Failures abort
+instead of starting the return pass. No additional drift limit is imposed.
+
+Software validation does not demonstrate hardware turn performance. No flashing
+or flight is performed as part of this code change.

@@ -63,3 +63,15 @@ tables removed. Map/reference paths/localized tags/heading and navigation/stuck
 events remain; height is explicitly unavailable. Only laptop GUI/camera integration
 and documentation change: firmware, protocol.py and flight_log.py match kaiwei.
 Existing local sdkconfig edits, esp-idf/ and build-kaiwei/ are preserved.
+
+
+### gui2 turn-in-place update — 7 November 2026
+
+The logged snake turnaround uses a dedicated CMD_TURN instead of GOTO hops.
+ESP32 holds captured NED x/y/z while ramping yaw at up to 15°/s and 10°/s².
+Completion requires measured yaw within 5° for 1 s; timeout is 30 s. Existing
+armed/Offboard/fresh-position checks and the laptop's 3 s stale threshold apply.
+Snake CSVs, return glide and telemetry packet size remain unchanged. Requires
+matching updated ESP32/laptop code; no PX4 firmware changes. No commit, flash or
+flight. Software checks passed for the turn/trajectory paths and firmware build;
+hardware position hold and rotation remain unverified. See esp32-starter/README.md.
