@@ -81,12 +81,20 @@ def start_live_plot(log_path: str, ref_path: str) -> None:
         log.warning("Could not start live plot: %s", exc)
 
 
-def save_plot_png(log_path: str, ref_path: str) -> None:
+def fmt_duration(s: float) -> str:
+    """94.2 -> '1:34.2'"""
+    m, sec = divmod(s, 60.0)
+    return f"{int(m)}:{sec:04.1f}"
+
+
+def save_plot_png(log_path: str, ref_path: str, flight_s: float | None = None) -> None:
     png = str(Path(log_path).with_suffix(".png"))
+    cmd = [sys.executable, str(PLOT_SCRIPT), "--file", log_path,
+           "--ref", ref_path, "--save", png]
+    if flight_s is not None:
+        cmd += ["--flight-time", f"{flight_s:.2f}"]
     try:
-        subprocess.run([sys.executable, str(PLOT_SCRIPT), "--file", log_path,
-                        "--ref", ref_path, "--save", png],
-                       timeout=60, check=True, capture_output=True)
+        subprocess.run(cmd, timeout=60, check=True, capture_output=True)
         log.info("Trajectory plot saved to %s", png)
     except Exception as exc:
         log.warning("Could not save trajectory PNG: %s", exc)
@@ -221,7 +229,23 @@ def main() -> None:
             time.sleep(0.05)
         return False
 
+    # Flight time = first CMD_START sent -> first CMD_LAND sent (laptop clock)
+    timing: dict[str, float | None] = {"start": None, "land": None}
+
+    def mark(cmd_type: int) -> None:
+        """Note the time; never raises, so it can't stop a START/LAND going out."""
+        try:
+            key = {CMD_START: "start", CMD_LAND: "land"}.get(cmd_type)
+            if key and timing[key] is None:
+                timing[key] = time.monotonic()
+                if key == "land" and timing["start"] is not None:
+                    log.info("CMD_LAND at %s after CMD_START",
+                             fmt_duration(timing["land"] - timing["start"]))
+        except Exception:
+            pass
+
     def send(cmd_type: int, name: str, gx: float = 0.0, gy: float = 0.0) -> None:
+        mark(cmd_type)
         if not comms.send_command(args.drone_id, CommandPacket(cmd_type, goal_x=gx, goal_y=gy)):
             raise RuntimeError(f"{name} not sent: drone {args.drone_id} IP unknown")
         log.info("%s sent", name)
@@ -364,6 +388,7 @@ def main() -> None:
             log.error("aborted — sending CMD_LAND")
             for _ in range(3):
                 comms.send_command(args.drone_id, CommandPacket(CMD_LAND))
+            mark(CMD_LAND)                  # after the LANDs are out
         raise
     finally:
         if flying:
@@ -379,7 +404,16 @@ def main() -> None:
                          "confirmed" if f["confirmed"] else "UNCONFIRMED")
         if snaps:
             snaps.close()
-        save_plot_png(flog.path, ref_path)
+        flight_s = None
+        if timing["start"] is not None and timing["land"] is not None:
+            flight_s = timing["land"] - timing["start"]
+            log.info("Flight time (CMD_START -> CMD_LAND): %s (%.1f s)",
+                     fmt_duration(flight_s), flight_s)
+        elif timing["start"] is None:
+            log.info("Flight time: not measured (no CMD_START sent; use --takeoff)")
+        else:
+            log.info("Flight time: not measured (no CMD_LAND sent)")
+        save_plot_png(flog.path, ref_path, flight_s)
 
 
 if __name__ == "__main__":
