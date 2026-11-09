@@ -62,6 +62,7 @@ REQUIRE_HAMMING0 = True  # tag16h5: only error-free decodes count
 OUTLIER_M       = 0.30   # drop sightings this far from the tag's median
 MIN_SIGHTINGS   = 2      # sightings needed to call a tag confirmed
 PROCESS_DELAY_S = 1.5    # wait for the next 1 Hz position before placing a tag
+LOCKED_REJECT   = "locked"  # reject reason: tag already confirmed before lock()
 
 CSV_FIELDS = ["t_s", "frame_ms", "tag_id", "hamming", "margin", "pose_err",
               "fwd_m", "right_m", "down_m", "range_m",
@@ -232,6 +233,10 @@ class TagLogger:
         self.on_place = on_place        # called (t_capture, packet, rows) per frame
         self.origin: Optional[tuple[float, float]] = None   # set by the mission;
         # otherwise the first telemetry position (the drone on the ground)
+        self.paused = False             # True: ignore new detections (e.g. flying home);
+        # ones already received are still placed and logged
+        self.lock_t: Optional[float] = None   # laptop clock; set by lock()
+        self._n_locked = 0              # sightings dropped because their tag was locked
         self._offset: Optional[float] = None     # laptop - drone clock (s)
         self._last_frame: Optional[int] = None
         self._pending: list[tuple[float, object]] = []
@@ -274,6 +279,30 @@ class TagLogger:
             return first if first else (0.0, 0.0)
         return self.origin
 
+    # -- locking (two-pass surveys) ---------------------------------------
+    def lock(self) -> list[int]:
+        """Freeze every tag confirmed so far (e.g. at the end of the forward
+        pass). Later sightings of a locked tag are logged with
+        reject=LOCKED_REJECT (used=0): they don't move its fused position, get
+        no picture and aren't announced, so only new tags come out of the
+        rest of the flight. Tags seen but not yet confirmed stay open, so a
+        later pass can still confirm them. Frames captured before this call
+        but still waiting to be placed count as before the lock.
+        Returns the ids locked so far."""
+        with self._lock:
+            self.lock_t = time.monotonic()
+            pre = [r for r in self._rows if r["used"]]
+            return [tid for tid, f in fuse_all(pre).items() if f["confirmed"]]
+
+    def _is_locked(self, tid: int, t_cap: float) -> bool:
+        """True if tid was confirmed from sightings captured before lock()."""
+        if self.lock_t is None or t_cap < self.lock_t:
+            return False
+        lock_s = self.lock_t - self.t0
+        f = fuse([r for r in self._rows
+                  if r["used"] and r["tag_id"] == tid and r["t_s"] < lock_s])
+        return bool(f and f["confirmed"])
+
     def close(self) -> dict[int, dict]:
         self._running = False
         if self._thread:
@@ -290,17 +319,20 @@ class TagLogger:
             w.writerow(["tag_id", "x_from_start_m", "y_from_start_m", "x_m", "y_m",
                         "spread_m", "sightings_used",
                         "sightings_all", "frames", "confirmed", "min_range_m",
-                        "ray_x_m", "ray_y_m", "first_seen_t_s"])
+                        "ray_x_m", "ray_y_m", "first_seen_t_s", "found_after_lock"])
+            lock_s = None if self.lock_t is None else self.lock_t - self.t0
             for tid, f in fused.items():
+                f["after_lock"] = lock_s is not None and f["first_t"] >= lock_s
                 w.writerow([tid, f"{f['x'] - ox:.3f}", f"{f['y'] - oy:.3f}",
                             f"{f['x']:.3f}", f"{f['y']:.3f}", f"{f['spread']:.3f}",
                             f["n"], f["n_all"], f["frames"], int(f["confirmed"]),
                             f"{f['min_range']:.2f}",
                             "" if f["ray_x"] is None else f"{f['ray_x']:.3f}",
                             "" if f["ray_y"] is None else f"{f['ray_y']:.3f}",
-                            f"{f['first_t']:.2f}"])
+                            f"{f['first_t']:.2f}", int(f["after_lock"])])
         rejected = sum(1 for r in self._rows if not r["used"])
-        print(f"[tags] {len(self._rows)} detections logged ({rejected} rejected), "
+        locked = f", {self._n_locked} of them repeats of locked tags" if self._n_locked else ""
+        print(f"[tags] {len(self._rows)} detections logged ({rejected} rejected{locked}), "
               f"{len(fused)} tag(s). Saved {self.path} and {self.summary_path}")
         return fused
 
@@ -322,7 +354,7 @@ class TagLogger:
                         self._offset = off if self._offset is None else min(self._offset, off)
                         if pkt.frame_ms != self._last_frame:      # 10 Hz repeats
                             self._last_frame = pkt.frame_ms
-                            if pkt.detections:
+                            if pkt.detections and not self.paused:
                                 self._pending.append((now, pkt))
                 self._process()
 
@@ -357,6 +389,9 @@ class TagLogger:
                 reject = "too far"
             elif abs(down - self.altitude) > FLOOR_TOL_M:
                 reject = "not at floor level"
+            elif self._is_locked(d.id, t_cap):
+                reject = LOCKED_REJECT
+                self._n_locked += 1
             row = {"t_s": round(t_cap - self.t0, 3), "frame_ms": pkt.frame_ms,
                    "tag_id": d.id, "hamming": d.hamming, "margin": round(d.margin, 1),
                    "pose_err": round(d.pose_err, 4),
@@ -380,6 +415,7 @@ class TagLogger:
             placed.append(row)
             if row["used"] and self.verbose:
                 self._announce(d.id)
+        placed = [r for r in placed if r["reject"] != LOCKED_REJECT]   # no pictures
         if placed and self.on_place:
             try:                        # e.g. tag_snapshots; must never break logging
                 self.on_place(t_cap, pkt, placed)
@@ -391,5 +427,7 @@ class TagLogger:
         if f and f["confirmed"] and tid not in self._announced:
             self._announced.add(tid)
             ox, oy = self._origin()
-            print(f"[tags] TAG {tid} confirmed at x={f['x'] - ox:+.2f} "
+            new = (" NEW since lock" if self.lock_t is not None
+                   and f["first_t"] >= self.lock_t - self.t0 else "")
+            print(f"[tags] TAG {tid}{new} confirmed at x={f['x'] - ox:+.2f} "
                   f"y={f['y'] - oy:+.2f} from the start ({f['frames']} sightings)")

@@ -16,6 +16,12 @@ Same as send_trajectory.py, plus:
   - --return-trajectory: after the first pass the drone turns 180 degrees and
     flies the second CSV (written by coverage_min_snap.py), lined up with the
     first pass, then lands.
+  - tag locking: when pass 1 (and the turn) is done, every tag confirmed so
+    far is locked. On pass 2 and the flight home, sightings of a locked tag
+    are logged as reject=locked and otherwise ignored (no position update, no
+    picture), so pass 2 only adds tags pass 1 missed, e.g. ones hidden behind
+    obstacles. Tags seen on pass 1 but not confirmed stay open. --no-tag-lock
+    turns it off (pass 2 then also refines pass-1 tags).
 Needs flight_log.py, plot_trajectory.py, tag_logger.py, tag_snapshots.py in
 the same folder.
 
@@ -42,7 +48,9 @@ Home. The spot the drone takes off from is "home" (0, 0). Every pass is
 anchored to it, so drift doesn't shift the plan:
   - pass 1 starts with a slow lead-in back over home (cancels takeoff drift),
   - pass 2's lead-in goes to home + the offset in the return CSV,
-  - after the last pass the drone flies back over home, then lands.
+  - after the last pass the drone flies back over home, then lands. With no
+    --return-trajectory, the camera stream is stopped and tag logging paused
+    for that flight home (it's a diagonal transit, not part of the survey).
 Each lead-in also brings the drone to --altitude (0.5 m) using the height in
 telemetry. The lead-in is rebuilt from the drone's live position on every
 start attempt, so drift while the ESP32 refuses a start doesn't carry over.
@@ -128,12 +136,20 @@ def start_live_plot(log_path: str, ref_path: str) -> None:
         log.warning("Could not start live plot: %s", exc)
 
 
-def save_plot_png(log_path: str, ref_path: str) -> None:
+def fmt_duration(s: float) -> str:
+    """94.2 -> '1:34.2'"""
+    m, sec = divmod(s, 60.0)
+    return f"{int(m)}:{sec:04.1f}"
+
+
+def save_plot_png(log_path: str, ref_path: str, flight_s: float | None = None) -> None:
     png = str(Path(log_path).with_suffix(".png"))
+    cmd = [sys.executable, str(PLOT_SCRIPT), "--file", log_path,
+           "--ref", ref_path, "--save", png]
+    if flight_s is not None:
+        cmd += ["--flight-time", f"{flight_s:.2f}"]
     try:
-        subprocess.run([sys.executable, str(PLOT_SCRIPT), "--file", log_path,
-                        "--ref", ref_path, "--save", png],
-                       timeout=60, check=True, capture_output=True)
+        subprocess.run(cmd, timeout=60, check=True, capture_output=True)
         log.info("Trajectory plot saved to %s", png)
     except Exception as exc:
         log.warning("Could not save trajectory PNG: %s", exc)
@@ -234,6 +250,8 @@ def main() -> None:
     ap.add_argument("--no-plot", action="store_true",
                     help="Don't open the live plot window (CSV log and PNG are still saved)")
     ap.add_argument("--no-tags", action="store_true", help="Don't log AprilTag detections")
+    ap.add_argument("--no-tag-lock", action="store_true",
+                    help="Don't lock pass-1 tags: pass 2 sightings of them count too")
     ap.add_argument("--no-snaps", action="store_true",
                     help="Don't stream the camera or save pictures of detections")
     ap.add_argument("--altitude", type=float, default=0.5,
@@ -285,7 +303,19 @@ def main() -> None:
             time.sleep(0.05)
         return False
 
+    # Flight time = first CMD_START sent -> first CMD_LAND sent (laptop clock)
+    timing: dict[str, float | None] = {"start": None, "land": None}
+
+    def mark(cmd_type: int) -> None:
+        key = {CMD_START: "start", CMD_LAND: "land"}.get(cmd_type)
+        if key and timing[key] is None:
+            timing[key] = time.monotonic()
+            if key == "land" and timing["start"] is not None:
+                log.info("CMD_LAND at %s after CMD_START",
+                         fmt_duration(timing["land"] - timing["start"]))
+
     def send(cmd_type: int, name: str, gx: float = 0.0, gy: float = 0.0) -> None:
+        mark(cmd_type)
         if not comms.send_command(args.drone_id, CommandPacket(cmd_type, goal_x=gx, goal_y=gy)):
             raise RuntimeError(f"{name} not sent: drone {args.drone_id} IP unknown")
         log.info("%s sent", name)
@@ -582,9 +612,23 @@ def main() -> None:
                     time.sleep(2.5)
                 else:
                     turn_around(turn)
+                if tags and not args.no_tag_lock:
+                    ids = tags.lock()
+                    log.info("tags locked after pass 1: %s; pass 2 only looks for new ones",
+                             ", ".join(map(str, ids)) or "none confirmed yet")
                 # Pass 2 lined up with pass 1: its start is home + the CSV offset
                 play(leg(org1 + start2[:2], pts2, GLIDE_MAX_M), "pass 2")
             if args.finish == "land" and not args.no_home:
+                if pts2 is None:
+                    # One pass only: the flight home is diagonal and not part of
+                    # the survey, so stop the camera and stop logging tags.
+                    if snaps:
+                        snaps.close()
+                        snaps = None
+                    if tags:
+                        tags.paused = True
+                    log.info("pass 1 done: camera off, tag logging paused for the "
+                             "return home")
                 play(leg(home, None, HOME_MAX_M, HOME_SPEED), "return home")
 
         if args.finish == "land":
@@ -595,6 +639,7 @@ def main() -> None:
     except (Exception, KeyboardInterrupt):
         if flying:
             log.error("aborted — sending CMD_LAND")
+            mark(CMD_LAND)
             for _ in range(3):
                 comms.send_command(args.drone_id, CommandPacket(CMD_LAND))
         raise
@@ -607,12 +652,22 @@ def main() -> None:
             fused = tags.close()
             ox, oy = tags._origin()
             for tid, f in fused.items():
-                log.info("  tag %2d  x=%+.2f  y=%+.2f  (+/-%.2f m, %d sightings, %s)",
+                log.info("  tag %2d  x=%+.2f  y=%+.2f  (+/-%.2f m, %d sightings, %s)%s",
                          tid, f["x"] - ox, f["y"] - oy, f["spread"], f["frames"],
-                         "confirmed" if f["confirmed"] else "UNCONFIRMED")
+                         "confirmed" if f["confirmed"] else "UNCONFIRMED",
+                         "  NEW on pass 2" if f.get("after_lock") else "")
         if snaps:
             snaps.close()
-        save_plot_png(flog.path, ref_path)
+        flight_s = None
+        if timing["start"] is not None and timing["land"] is not None:
+            flight_s = timing["land"] - timing["start"]
+            log.info("Flight time (CMD_START -> CMD_LAND): %s (%.1f s)",
+                     fmt_duration(flight_s), flight_s)
+        elif timing["start"] is None:
+            log.info("Flight time: not measured (no CMD_START sent; use --takeoff)")
+        else:
+            log.info("Flight time: not measured (no CMD_LAND sent)")
+        save_plot_png(flog.path, ref_path, flight_s)
 
 
 if __name__ == "__main__":

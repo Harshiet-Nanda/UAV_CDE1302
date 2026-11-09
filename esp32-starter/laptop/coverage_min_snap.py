@@ -54,9 +54,12 @@ import scipy.sparse.linalg as spla
 # SETTINGS: edit these, then run  python trajectory/coverage_min_snap.py
 # (any of them can still be overridden on the command line, e.g. --length 6)
 # ===========================================================================
-ROOM_LENGTH_M = 5.0      # start wall -> far wall, the way the drone's nose points
-ROOM_WIDTH_M  = 1.9      # along the start wall (side wall to side wall)
-MARGIN_M      = 0.5      # closest the path may get to any wall
+ROOM_LENGTH_M = 5.4      # start wall -> far wall, the way the drone's nose points
+ROOM_WIDTH_M  = 3.5      # along the start wall (side wall to side wall)
+MARGIN_LENGTH_M = 0.4    # closest the path may get to the start and far walls
+                         # (the ends of --length). Drift along the lanes is small.
+MARGIN_WIDTH_M  = 0.7    # closest the path may get to the side walls (the ends of
+                         # --width), where turns and sideways drift happen
 ALTITUDE_M    = 0.5      # flying height used for the camera footprint
 LANES         = "across" # "across": side to side, ends at far wall
                          # "along":  lengthwise, returns to the start
@@ -91,7 +94,7 @@ DEFAULT_VFOV = math.degrees(2 * math.atan(IMG_H / 2 / FY))   # ~76.1 deg, along
 TRAJ_MAX_PTS = 2400        # NAV_TRAJ_MAX_PTS in main/nav_task.h
 UPLOAD_DT = 0.05           # send_trajectory.py default --dt
 # main/nav_task.c collision_avoid() is disabled (returns false first thing), so
-# nothing onboard stops the drone at a wall: --margin is the only protection.
+# nothing onboard stops the drone at a wall: the margins are the only protection.
 
 
 # ---------------------------------------------------------------------------
@@ -257,21 +260,22 @@ def footprint(alt, hfov, vfov, tag, pitch_deg=CAMERA_PITCH_DEG,
 
 
 def plan_across(L, W, fp: Footprint, overlap, margin, start="centre") -> Plan:
+    mf, mr = margin                        # (start/far walls, side walls)
     """Lanes run side to side (across --width), stepping away from the back
     wall; the path ends at the far wall. The nose stays pointing into the
     room, so lanes are spaced by how deep (along f) the camera's view is."""
     step = fp.depth * (1.0 - overlap)
     # Lane ends: near enough to the side walls that most of the view reaches
     # them (30th percentile of how far each row of the view reaches sideways).
-    r_in = max(margin, float(np.percentile(fp.half_widths, 30)))
+    r_in = max(mr, float(np.percentile(fp.half_widths, 30)))
     # First lane as close to the back wall as allowed (the view starts ahead
     # of the drone); last lane just close enough that the view reaches the
     # far wall.
-    f0 = max(margin, -fp.f_lo)
-    f1 = L - max(margin, fp.f_hi)
+    f0 = max(mf, -fp.f_lo)
+    f1 = L - max(mf, fp.f_hi)
     r0, r1 = r_in, W - r_in
     if r1 - r0 <= 0:
-        raise SystemExit("Room too narrow for this --margin.")
+        raise SystemExit("Room too narrow for this --margin-width.")
     f1 = max(f1, f0)                       # short room: one lane, as far back as allowed
     if f1 - f0 < 0.5 * step:              # one lane in the middle sees it all
         lanes = np.array([(f0 + f1) / 2])
@@ -283,7 +287,7 @@ def plan_across(L, W, fp: Footprint, overlap, margin, start="centre") -> Plan:
     spacing = float(lanes[1] - lanes[0]) if len(lanes) > 1 else 0.0
     if len(lanes) > 1 and r1 - r0 < spacing + 1e-6:
         raise SystemExit(f"Lanes ({r1 - r0:.2f} m) are shorter than the turn diameter "
-                         f"({spacing:.2f} m). Lower --margin or use --lanes along.")
+                         f"({spacing:.2f} m). Lower --margin-width or use --lanes along.")
 
     corners = []
     if start == "centre":
@@ -302,13 +306,14 @@ def plan_across(L, W, fp: Footprint, overlap, margin, start="centre") -> Plan:
 
 
 def plan_lanes(L, W, fp: Footprint, overlap, margin, start="centre") -> Plan:
+    mf, mr = margin                        # (start/far walls, side walls)
     step = fp.width * (1.0 - overlap)       # sweeping along f: the widest row counts
-    r_in = max(margin, fp.width / 2)       # lane centre-line distance from side walls
+    r_in = max(mr, fp.width / 2)           # lane centre-line distance from side walls
     r0, r_end = r_in, W - r_in
-    f0 = max(margin, -fp.f_lo)             # turn lines: view reaches the end walls
-    f1 = L - max(margin, fp.f_hi)
-    if f1 - f0 <= 0 or W < 2 * margin:
-        raise SystemExit("Room too small for --lanes along with this --margin and camera "
+    f0 = max(mf, -fp.f_lo)                 # turn lines: view reaches the end walls
+    f1 = L - max(mf, fp.f_hi)
+    if f1 - f0 <= 0 or W < 2 * mr:
+        raise SystemExit("Room too small for --lanes along with these margins and camera "
                          "view; try --lanes across.")
     if r_end <= r0:
         lanes = np.array([W / 2])
@@ -320,7 +325,7 @@ def plan_lanes(L, W, fp: Footprint, overlap, margin, start="centre") -> Plan:
     spacing = float(lanes[1] - lanes[0]) if len(lanes) > 1 else 0.0
     if len(lanes) > 1 and f1 - f0 < spacing + 1e-6:
         raise SystemExit(f"Lanes ({f1 - f0:.2f} m) are shorter than the turn diameter "
-                         f"({spacing:.2f} m). Swap --length and --width or lower --margin.")
+                         f"({spacing:.2f} m). Swap --length and --width or lower --margin-length.")
 
     if start == "centre" and len(lanes) > 1:
         c = W / 2
@@ -505,10 +510,15 @@ def main() -> int:
     ap.add_argument("--length", type=float, default=ROOM_LENGTH_M,
                     help="Room size along the drone's nose direction (m)")
     ap.add_argument("--width", type=float, default=ROOM_WIDTH_M, help="Room size across (m)")
-    ap.add_argument("--margin", type=float, default=MARGIN_M,
-                    help="Minimum distance from the path to any wall (m). Must cover takeoff "
-                         "drift (~0.35 m seen in logs) plus the drone's own radius; onboard "
-                         "collision avoidance is disabled in this firmware.")
+    ap.add_argument("--margin-length", type=float, default=MARGIN_LENGTH_M,
+                    help="Minimum distance from the path to the start and far walls (the ends "
+                         "of --length, m)")
+    ap.add_argument("--margin-width", type=float, default=MARGIN_WIDTH_M,
+                    help="Minimum distance from the path to the side walls (the ends of "
+                         "--width, m). Must cover takeoff drift (~0.35 m seen in logs) plus "
+                         "the drone's own radius; onboard collision avoidance is disabled.")
+    ap.add_argument("--margin", type=float, default=None,
+                    help="Set both margins to this (m); overrides the two above")
     ap.add_argument("--altitude", type=float, default=ALTITUDE_M,
                     help="Flying height for the footprint (m). The firmware hovers at "
                          "CRUISE_ALT_M = 0.5 m; changing it needs a reflash.")
@@ -551,6 +561,8 @@ def main() -> int:
     ap.add_argument("--out", default=str(HERE / "coverage_traj.csv"))
     ap.add_argument("--no-png", action="store_true")
     a = ap.parse_args()
+    if a.margin is not None:
+        a.margin_length = a.margin_width = a.margin
 
     if a.max_speed > 0.30 + 1e-9:
         raise SystemExit("--max-speed above 0.30 m/s will be refused by send_trajectory.py")
@@ -570,7 +582,7 @@ def main() -> int:
     except Exception:
         pass
     planner = plan_across if a.lanes == "across" else plan_lanes
-    plan = planner(L, W, fp, a.overlap, a.margin, a.start)
+    plan = planner(L, W, fp, a.overlap, (a.margin_length, a.margin_width), a.start)
     radius = plan.spacing / 2
     pieces = fillet_polyline(plan.corners, radius)
     wp = build_waypoints(pieces, a.line_step, math.radians(45))
@@ -618,7 +630,8 @@ def main() -> int:
     # --- checks -------------------------------------------------------------
     q = pos
     dev = np.min(np.vstack([pc.distance(q) for pc in pieces]), axis=0)
-    wall = np.min(np.column_stack([q[:, 0], L - q[:, 0], q[:, 1], W - q[:, 1]]), axis=1)
+    wall_f = np.minimum(q[:, 0], L - q[:, 0])          # to the start / far wall
+    wall_r = np.minimum(q[:, 1], W - q[:, 1])          # to a side wall
     edges = np.concatenate([[0.0], np.cumsum(T)])
     v_join = np.array([sample(coeff, T, np.array([edges[i]]))[1][0]
                        for i in range(1, len(T))])
@@ -656,8 +669,8 @@ def main() -> int:
         sx, sy = a.return_shift
         pos2 = pos[::-1] + np.array([sx, sy * sign])
         stamp(pos2, True)
-        wall2 = np.min(np.column_stack([pos2[:, 0], L - pos2[:, 0],
-                                        pos2[:, 1], W - pos2[:, 1]]), axis=1)
+        wall2_f = np.minimum(pos2[:, 0], L - pos2[:, 0])
+        wall2_r = np.minimum(pos2[:, 1], W - pos2[:, 1])
     coverage_both = seen.mean() * 100
 
     # --- write CSV in NED, relative to the start point ------------------------
@@ -704,7 +717,10 @@ def main() -> int:
 
     side = "left" if a.sweep == "right" else "right"
     start = plan.corners[0]
-    print(f"Room {L:.2f} m (along nose) x {W:.2f} m, altitude {a.altitude:.2f} m")
+    print(f"Room: length {L:.2f} m (start wall -> far wall, along the nose) x "
+          f"width {W:.2f} m (side wall to side wall), altitude {a.altitude:.2f} m")
+    print(f"Margins: {a.margin_length:.2f} m from the start/far walls, "
+          f"{a.margin_width:.2f} m from the side walls")
     hw = fp.half_widths
     print(f"Camera at {a.pitch:g} deg sees tags {fp.f_lo:+.2f} to {fp.f_hi:+.2f} m ahead, "
           f"up to +/-{hw.max():.2f} m to the side (within {a.max_range:.2f} m, "
@@ -717,7 +733,8 @@ def main() -> int:
     print(f"Path {sum(pc.length for pc in pieces):.1f} m, duration {duration:.1f} s, "
           f"peak speed {speed.max():.3f} m/s, peak accel {np.linalg.norm(acc, axis=1).max():.3f} m/s^2")
     print(f"Max deviation from planned path {dev.max() * 100:.1f} cm; "
-          f"closest approach to a wall {wall.min():.2f} m")
+          f"closest approach: {wall_f.min():.2f} m to the start/far walls, "
+          f"{wall_r.min():.2f} m to the side walls")
     if pos2 is None:
         print(f"Camera coverage of the room: {coverage:.0f} %")
     else:
@@ -725,14 +742,19 @@ def main() -> int:
               f"{coverage_both:.0f} % with the return pass "
               f"(shift x={a.return_shift[0]:+.2f} y={a.return_shift[1]:+.2f} m, "
               f"{duration:.0f} s more)")
-        if wall2.min() < a.margin - 0.01:
-            print(f"WARNING: the return-pass shift brings the path {wall2.min():.2f} m from "
-                  f"a wall (margin {a.margin:.2f} m). Use a smaller --return-shift.")
+        if wall2_f.min() < a.margin_length - 0.01 or wall2_r.min() < a.margin_width - 0.01:
+            print(f"WARNING: the return-pass shift brings the path {wall2_f.min():.2f} m from "
+                  f"the start/far walls (margin {a.margin_length:.2f}) and {wall2_r.min():.2f} m "
+                  f"from the side walls (margin {a.margin_width:.2f}). Use a smaller "
+                  f"--return-shift.")
     if backward:
         print(f"WARNING: velocity reverses at waypoints {backward}; try --turn-speed or --line-step")
-    if wall.min() < 0.6:
-        print("WARNING: path comes within 0.6 m of a wall. Takeoff drift alone has been "
-              "~0.35 m and nothing onboard stops a wall strike. Increase --margin.")
+    if wall_r.min() < 0.6:
+        print("WARNING: path comes within 0.6 m of a side wall. Takeoff drift alone has been "
+              "~0.35 m and nothing onboard stops a wall strike. Increase --margin-width.")
+    if wall_f.min() < 0.35:
+        print("WARNING: path comes within 0.35 m of the start/far wall. Increase "
+              "--margin-length.")
     print(f"Upload at --dt {UPLOAD_DT}: {n_up} points (limit {TRAJ_MAX_PTS}), "
           f"max speed {v_up:.3f} m/s")
     if n_up > TRAJ_MAX_PTS:
@@ -783,8 +805,32 @@ def draw(png, a, plan, pieces, wp, pos, speed, t, seen, g, coverage, duration, s
     ax.imshow(seen, origin="lower", extent=[0, W, 0, L] if sign > 0 else [W, 0, 0, L],
               cmap="Greens", alpha=0.35, vmin=0, vmax=1.6, aspect="equal")
     ax.add_patch(Rectangle((0, 0), W, L, fill=False, lw=2.5, color="k"))
-    ax.add_patch(Rectangle((a.margin, a.margin), W - 2 * a.margin, L - 2 * a.margin,
+    mf, mr = a.margin_length, a.margin_width
+    ax.add_patch(Rectangle((mr, mf), W - 2 * mr, L - 2 * mf,
                            fill=False, lw=1, ls=":", color="tab:red"))
+    # room dimensions, outside the walls
+    dim = dict(arrowstyle="<->", color="k", lw=1.2)
+    ax.annotate("", xy=(0, -0.32), xytext=(W, -0.32), arrowprops=dim, annotation_clip=False)
+    ax.text(W / 2, -0.38, f"WIDTH {W:g} m (start wall)", ha="center", va="top",
+            fontsize=9, fontweight="bold")
+    ax.annotate("", xy=(-0.32, 0), xytext=(-0.32, L), arrowprops=dim, annotation_clip=False)
+    ax.text(-0.38, L / 2, f"LENGTH {L:g} m", ha="right", va="center", rotation=90,
+            fontsize=9, fontweight="bold")
+    ax.text(W / 2, L + 0.06, "far wall", ha="center", va="bottom", fontsize=8)
+    # margins: short red arrows from each wall
+    mk = dict(arrowstyle="<->", color="tab:red", lw=1)
+    xm = W + 0.12                          # just outside the right-hand wall
+    ax.annotate("", xy=(xm, 0), xytext=(xm, mf), arrowprops=mk, annotation_clip=False)
+    ax.text(xm + 0.05, mf / 2, f"{mf:.2f} m", color="tab:red", fontsize=8, va="center")
+    ax.annotate("", xy=(xm, L), xytext=(xm, L - mf), arrowprops=mk, annotation_clip=False)
+    ax.text(xm + 0.05, L - mf / 2, f"{mf:.2f} m", color="tab:red", fontsize=8, va="center")
+    ym = L * 0.5
+    ax.annotate("", xy=(0, ym), xytext=(mr, ym), arrowprops=mk)
+    ax.text(mr / 2, ym + 0.05, f"{mr:.2f} m", color="tab:red", fontsize=8, ha="center",
+            va="bottom")
+    ax.annotate("", xy=(W, ym), xytext=(W - mr, ym), arrowprops=mk)
+    ax.text(W - mr / 2, ym + 0.05, f"{mr:.2f} m", color="tab:red", fontsize=8, ha="center",
+            va="bottom")
     pts = np.column_stack([X(pos[:, 1]), pos[:, 0]]).reshape(-1, 1, 2)
     lc = LineCollection(np.concatenate([pts[:-1], pts[1:]], axis=1), cmap="viridis", lw=2.2)
     lc.set_array(speed[:-1])
@@ -821,15 +867,17 @@ def draw(png, a, plan, pieces, wp, pos, speed, t, seen, g, coverage, duration, s
     ax.plot(X(pos[mid, 1]), pos[mid, 0], "o", color="tab:blue", ms=4)
     ax.plot([], [], ls="--", color="tab:blue",
             label=f"camera view at {a.pitch:g} deg (tag fully in view)")
-    ax.plot([], [], ls=":", color="tab:red", label=f"--margin {a.margin:.2f} m")
-    ax.set_xlim(-0.2, W + 0.2)
-    ax.set_ylim(-0.2, L + 0.2)
+    ax.plot([], [], ls=":", color="tab:red",
+            label=f"margins: {mf:.2f} m start/far walls, {mr:.2f} m side walls")
+    ax.set_xlim(-0.75, W + 0.75)
+    ax.set_ylim(-0.75, L + 0.3)
     ax.set_aspect("equal")
     ax.set_xlabel(f"across the room (m)   [{side} wall at 0]" if sign > 0
                   else f"across the room (m)   [{side} wall at {W:g}]")
     ax.set_ylabel("along the room, nose direction (m)   [back wall at 0]")
     ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.08), ncol=2, fontsize=8)
-    ax.set_title(f"{L:g} m x {W:g} m room, top view, {len(plan.lanes_r)} lanes\n"
+    ax.set_title(f"room: length {L:g} m x width {W:g} m, top view, "
+                 f"{len(plan.lanes_r)} lanes\n"
                  f"green = seen by camera ({coverage:.0f} % of floor)")
 
     axs.plot(t, speed, color="tab:blue")
