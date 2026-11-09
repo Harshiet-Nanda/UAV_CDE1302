@@ -25,6 +25,9 @@ Room coordinates used below (what you measure with a tape):
 
 Outputs (default next to this file):
     coverage_traj.csv   t,x,y,z (s, NED m), offsets from the start point, 100 Hz
+    coverage_traj_return.csv          return pass: the snake backwards
+    coverage_traj_return_shifted.csv  alternative return: lanes shifted toward the
+                        far wall, last U-turn stretched so it ends at the start
     coverage_traj.png   top view: room, path, camera coverage, speed
 
 Camera model: the floor area where a whole tag is in view is worked out
@@ -54,7 +57,7 @@ import scipy.sparse.linalg as spla
 # SETTINGS: edit these, then run  python trajectory/coverage_min_snap.py
 # (any of them can still be overridden on the command line, e.g. --length 6)
 # ===========================================================================
-ROOM_LENGTH_M = 5.4      # start wall -> far wall, the way the drone's nose points
+ROOM_LENGTH_M = 5.3      # start wall -> far wall, the way the drone's nose points
 ROOM_WIDTH_M  = 3.5      # along the start wall (side wall to side wall)
 MARGIN_LENGTH_M = 0.4    # closest the path may get to the start and far walls
                          # (the ends of --length). Drift along the lanes is small.
@@ -81,6 +84,15 @@ MAX_RANGE_M   = 1.2      # furthest camera-to-tag distance that still detects;
 RETURN_PASS    = True    # False = one pass only, as before
 RETURN_SHIFT_X = 0.0     # m, + = toward the far wall, - = toward the start wall
 RETURN_SHIFT_Y = 0.0     # m, + = to the drone's right (as it faces at takeoff)
+
+# Shifted return (a third CSV, *_return_shifted.csv, an alternative to the
+# plain return): after the 180 deg turn the drone backs up toward the far wall
+# by this much and flies every lane shifted that way, so its lanes fall between
+# the first pass's. Its last U-turn (into the first lane) is stretched by the
+# same amount, so the first lane and the finish are NOT shifted: it lands back
+# where pass 1 started. None = half the lane spacing.
+SHIFTED_RETURN   = True
+SHIFTED_RETURN_X = 0.3  # m toward the far wall, or None for half the lane spacing
 # ===========================================================================
 
 HERE = Path(__file__).resolve().parent
@@ -496,6 +508,66 @@ def sample(coeff, T, t):
 # Main
 # ---------------------------------------------------------------------------
 
+def fit_trajectory(pieces, wp: Waypoints, max_speed: float, turn_speed: float):
+    """Minimum-snap trajectory through wp, timed so the peak speed is max_speed.
+    Returns (coeff, T, duration, t, pos, vel, acc, speed), t at 100 Hz.
+
+    Time allocation: length / nominal speed, slower in turns and next to
+    stops (start, end, reversals). A few rounds then rebalance segment times
+    so no stretch is much faster than its nominal speed, which stops one
+    short burst from slowing the whole flight. Solved at mean 1 s for
+    conditioning, then scaled uniformly to hit max_speed; a uniform time
+    scale leaves the minimum-snap shape unchanged."""
+    v_nom = np.where(wp.seg_turn, turn_speed, 1.0)
+    shape_T = wp.seg_len / v_nom
+    next_to_stop = wp.stop[:-1] | wp.stop[1:]
+    shape_T[next_to_stop] *= 2.0
+    best = None
+    for _ in range(7):
+        shape_T *= len(shape_T) / shape_T.sum()
+        coeff = solve_min_snap(wp, shape_T)
+        edges = np.concatenate([[0.0], np.cumsum(shape_T)])
+        ts = np.concatenate([np.linspace(edges[i], edges[i + 1], 25)
+                             for i in range(len(shape_T))])
+        p_s, v_s, _ = sample(coeff, shape_T, ts)
+        sp_s = np.linalg.norm(v_s, axis=1).reshape(len(shape_T), 25)
+        dur = shape_T.sum() * sp_s.max() / max_speed
+        dev_s = np.min(np.vstack([pc.distance(p_s) for pc in pieces]), axis=0).max()
+        # keep the fastest allocation that still follows the planned path
+        key = (dev_s > 0.02, dur if dev_s <= 0.02 else dev_s)
+        if best is None or key < best[0]:
+            best = (key, shape_T.copy())
+        ratio = sp_s.max(axis=1) / v_nom
+        shape_T = shape_T * np.clip(ratio / np.median(ratio), 0.7, 1.5) ** 0.5
+
+    shape_T = best[1]
+    coeff = solve_min_snap(wp, shape_T)
+    t_shape = np.linspace(0, shape_T.sum(), 20000)
+    _, v_shape, _ = sample(coeff, shape_T, t_shape)
+    scale = np.linalg.norm(v_shape, axis=1).max() / max_speed
+    T = shape_T * scale
+    duration = float(T.sum())
+
+    t = np.round(np.arange(0.0, duration + 1e-9, 0.01), 2)
+    pos, vel, acc = sample(coeff, T, t)
+    speed = np.linalg.norm(vel, axis=1)
+    return coeff, T, duration, t, pos, vel, acc, speed
+
+
+def shifted_return_corners(plan: Plan, shift: float) -> list[np.ndarray]:
+    """Pass 1's corners backwards, every lane except the first moved `shift`
+    toward the far wall. The first lane (and the start point on it) stays, so
+    the U-turn into it is `shift` longer and the path ends where pass 1 began."""
+    first = plan.lanes_r[0]                # plan_across: lanes_r holds each lane's f
+    out = []
+    for c in plan.corners[::-1]:
+        c = c.copy()
+        if abs(c[0] - first) > 1e-9:
+            c[0] += shift
+        out.append(c)
+    return out
+
+
 def _shown(path: Path) -> str:
     """Path relative to the current folder when possible (for the printed command)."""
     try:
@@ -558,6 +630,12 @@ def main() -> int:
     ap.add_argument("--return-shift", type=float, nargs=2, metavar=("X", "Y"),
                     default=(RETURN_SHIFT_X, RETURN_SHIFT_Y),
                     help="Shift of the return pass (m): X toward the far wall, Y to the right")
+    ap.add_argument("--no-shifted-return", dest="shifted_return", action="store_false",
+                    default=SHIFTED_RETURN,
+                    help="Don't write the shifted return (*_return_shifted.csv)")
+    ap.add_argument("--shifted-return-x", type=float, default=SHIFTED_RETURN_X,
+                    help="Shifted return: how far its lanes move toward the far wall (m); "
+                         "default half the lane spacing")
     ap.add_argument("--out", default=str(HERE / "coverage_traj.csv"))
     ap.add_argument("--no-png", action="store_true")
     a = ap.parse_args()
@@ -587,45 +665,8 @@ def main() -> int:
     pieces = fillet_polyline(plan.corners, radius)
     wp = build_waypoints(pieces, a.line_step, math.radians(45))
 
-    # Time allocation: length / nominal speed, slower in turns and next to
-    # stops (start, end, reversals). A few rounds then rebalance segment times
-    # so no stretch is much faster than its nominal speed, which stops one
-    # short burst from slowing the whole flight. Solved at mean 1 s for
-    # conditioning, then scaled uniformly to hit --max-speed; a uniform time
-    # scale leaves the minimum-snap shape unchanged.
-    v_nom = np.where(wp.seg_turn, a.turn_speed, 1.0)
-    shape_T = wp.seg_len / v_nom
-    next_to_stop = wp.stop[:-1] | wp.stop[1:]
-    shape_T[next_to_stop] *= 2.0
-    best = None
-    for _ in range(7):
-        shape_T *= len(shape_T) / shape_T.sum()
-        coeff = solve_min_snap(wp, shape_T)
-        edges = np.concatenate([[0.0], np.cumsum(shape_T)])
-        ts = np.concatenate([np.linspace(edges[i], edges[i + 1], 25)
-                             for i in range(len(shape_T))])
-        p_s, v_s, _ = sample(coeff, shape_T, ts)
-        sp_s = np.linalg.norm(v_s, axis=1).reshape(len(shape_T), 25)
-        dur = shape_T.sum() * sp_s.max() / a.max_speed
-        dev_s = np.min(np.vstack([pc.distance(p_s) for pc in pieces]), axis=0).max()
-        # keep the fastest allocation that still follows the planned path
-        key = (dev_s > 0.02, dur if dev_s <= 0.02 else dev_s)
-        if best is None or key < best[0]:
-            best = (key, shape_T.copy())
-        ratio = sp_s.max(axis=1) / v_nom
-        shape_T = shape_T * np.clip(ratio / np.median(ratio), 0.7, 1.5) ** 0.5
-
-    shape_T = best[1]
-    coeff = solve_min_snap(wp, shape_T)
-    t_shape = np.linspace(0, shape_T.sum(), 20000)
-    _, v_shape, _ = sample(coeff, shape_T, t_shape)
-    scale = np.linalg.norm(v_shape, axis=1).max() / a.max_speed
-    T = shape_T * scale
-    duration = float(T.sum())
-
-    t = np.round(np.arange(0.0, duration + 1e-9, 0.01), 2)
-    pos, vel, acc = sample(coeff, T, t)
-    speed = np.linalg.norm(vel, axis=1)
+    coeff, T, duration, t, pos, vel, acc, speed = fit_trajectory(
+        pieces, wp, a.max_speed, a.turn_speed)
 
     # --- checks -------------------------------------------------------------
     q = pos
@@ -647,17 +688,19 @@ def main() -> int:
     ii, jj = np.nonzero(fp.mask)
     off_f = np.round(fp.F[ii] / g).astype(int)
     off_r = np.round(sign * fp.R[jj] / g).astype(int)
-    def stamp(path, flip):
+    def stamp(path, flip, into=None):
         """Mark what the camera sees along `path`; flip = drone turned 180 deg."""
+        into = seen if into is None else into
         k = -1 if flip else 1
         for pf, pr in path[::5]:
             fi = int(round(pf / g)) + k * off_f
             rj = int(round(pr / g)) + k * off_r
             ok = (fi >= 0) & (fi < nf) & (rj >= 0) & (rj < nr)
-            seen[fi[ok], rj[ok]] = True
+            into[fi[ok], rj[ok]] = True
 
     stamp(pos, False)
     coverage = seen.mean() * 100
+    seen_pass1 = seen.copy()
     blind_back = plan.f0 + fp.f_lo            # strip at the start wall never in view
 
     # Return pass: same course backwards in time, shifted, after a 180 deg turn.
@@ -672,6 +715,22 @@ def main() -> int:
         wall2_f = np.minimum(pos2[:, 0], L - pos2[:, 0])
         wall2_r = np.minimum(pos2[:, 1], W - pos2[:, 1])
     coverage_both = seen.mean() * 100
+
+    # Shifted return: lanes moved toward the far wall, last U-turn stretched
+    # so it still finishes at pass 1's start. Its own minimum-snap solve.
+    pos3 = None
+    if a.shifted_return and a.lanes == "across" and len(plan.lanes_r) > 1:
+        sx3 = plan.spacing / 2 if a.shifted_return_x is None else a.shifted_return_x
+        pieces3 = fillet_polyline(shifted_return_corners(plan, sx3), radius)
+        wp3 = build_waypoints(pieces3, a.line_step, math.radians(45))
+        _, T3, duration3, t3, pos3, _, acc3, speed3 = fit_trajectory(
+            pieces3, wp3, a.max_speed, a.turn_speed)
+        dev3 = np.min(np.vstack([pc.distance(pos3) for pc in pieces3]), axis=0)
+        wall3_f = np.minimum(pos3[:, 0], L - pos3[:, 0])
+        wall3_r = np.minimum(pos3[:, 1], W - pos3[:, 1])
+        seen3 = seen_pass1.copy()
+        stamp(pos3, True, seen3)
+        coverage3 = seen3.mean() * 100
 
     # --- write CSV in NED, relative to the start point ------------------------
     df = pos[:, 0] - pos[0, 0]
@@ -692,13 +751,26 @@ def main() -> int:
                 df_ * math.sin(psi) + dr_ * math.cos(psi))
 
     out2 = out.with_name(out.stem + "_return.csv")
+    out3 = out.with_name(out.stem + "_return_shifted.csv")
+    # Turn toward the middle of the room so the turn's small sideways drift
+    # stays away from the side wall the snake ended next to.
+    e1 = pos[-1]
+    toward_centre = (W / 2 - e1[1]) * sign          # + = centre is to the drone's right
+    turn = "right" if toward_centre >= 0 else "left"
+    if pos3 is not None:
+        x3, y3 = to_ned(pos3)            # in pass 1's frame (start of pass 1 = 0, 0)
+        with open(out3, "w", newline="") as fh:
+            # same header as *_return.csv: the sender glides to this start
+            # (pass 1's end, backed up sx3 toward the far wall) after the turn
+            fh.write(f"# pass2_start_from_pass1_start: {x3[0]:.6f},{y3[0]:.6f}\n")
+            fh.write(f"# turn: {turn}\n")
+            fh.write(f"# shifted return: lanes +{sx3:.3f} m toward the far wall, "
+                     f"ends at pass 1's start\n")
+            fh.write("t,x,y,z\n")
+            for row in zip(t3, x3 - x3[0], y3 - y3[0]):
+                fh.write(f"{row[0]:.2f},{row[1]:.6f},{row[2]:.6f},0\n")
     if pos2 is not None:
         x2, y2 = to_ned(pos2)            # in pass 1's frame (start of pass 1 = 0, 0)
-        # Turn toward the middle of the room so the turn's small sideways drift
-        # stays away from the side wall the snake ended next to.
-        e1 = pos[-1]
-        toward_centre = (W / 2 - e1[1]) * sign      # + = centre is to the drone's right
-        turn = "right" if toward_centre >= 0 else "left"
         with open(out2, "w", newline="") as fh:
             # send_trajectory_logged.py reads these lines to line the pass up
             fh.write(f"# pass2_start_from_pass1_start: {x2[0]:.6f},{y2[0]:.6f}\n")
@@ -747,6 +819,24 @@ def main() -> int:
                   f"the start/far walls (margin {a.margin_length:.2f}) and {wall2_r.min():.2f} m "
                   f"from the side walls (margin {a.margin_width:.2f}). Use a smaller "
                   f"--return-shift.")
+    if pos3 is not None:
+        n_up3 = len(np.arange(0.0, duration3 + 1e-9, UPLOAD_DT))
+        e3 = pos3[-1] - pos[0]
+        print(f"Shifted return: lanes +{sx3:.2f} m toward the far wall, last U-turn "
+              f"{plan.spacing + sx3:.2f} m long instead of {plan.spacing:.2f} m; "
+              f"{duration3:.0f} s, peak {speed3.max():.3f} m/s, "
+              f"{dev3.max() * 100:.1f} cm max deviation, {n_up3} upload points")
+        print(f"  coverage {coverage3:.0f} % with pass 1 (plain return: {coverage_both:.0f} %); "
+              f"backs up {sx3:.2f} m after the turn; ends {np.linalg.norm(e3) * 100:.1f} cm "
+              f"from pass 1's start; closest {wall3_f.min():.2f} m to the start/far walls, "
+              f"{wall3_r.min():.2f} m to the side walls")
+        if wall3_f.min() < a.margin_length - 0.01 or wall3_r.min() < a.margin_width - 0.01:
+            print(f"WARNING: the shifted return breaks the margins (start/far "
+                  f"{a.margin_length:.2f} m, side {a.margin_width:.2f} m). Use a smaller "
+                  f"--shifted-return-x (at most "
+                  f"{L - a.margin_length - plan.lanes_r[-1]:.2f} m here).")
+        if n_up3 > TRAJ_MAX_PTS:
+            print(f"WARNING: shifted return needs {n_up3} upload points > {TRAJ_MAX_PTS}")
     if backward:
         print(f"WARNING: velocity reverses at waypoints {backward}; try --turn-speed or --line-step")
     if wall_r.min() < 0.6:
@@ -774,20 +864,26 @@ def main() -> int:
     if a.lanes == "along" and W > L:
         print("Note: the start wall (--width) is the longer side; lanes still run along "
               "--length, so there will be more turns.")
-    print(f"Wrote {out}" + (f" and {out2}" if pos2 is not None else ""))
-    print(f"\npython laptop/send_trajectory_logged.py --drone-id <ID> --takeoff --takeoff-wait 15 "
-          f"--confirm --trajectory {_shown(out)}"
-          + (f" --return-trajectory {_shown(out2)}" if pos2 is not None else "")
-          + (f" --dt {dt_needed:.2f}" if n_up > TRAJ_MAX_PTS else ""))
+    print(f"Wrote {out}" + (f" and {out2}" if pos2 is not None else "")
+          + (f" and {out3}" if pos3 is not None else ""))
+    cmd = (f"python laptop/send_trajectory_logged.py --drone-id <ID> --takeoff --takeoff-wait 15 "
+           f"--confirm --trajectory {_shown(out)}")
+    dt_arg = f" --dt {dt_needed:.2f}" if n_up > TRAJ_MAX_PTS else ""
+    print(f"\n{cmd}" + (f" --return-trajectory {_shown(out2)}" if pos2 is not None else "")
+          + dt_arg)
+    if pos3 is not None:
+        print(f"\nor, with the shifted return:\n{cmd} --return-trajectory {_shown(out3)}"
+              + dt_arg)
 
     if not a.no_png:
         draw(out.with_suffix(".png"), a, plan, pieces, wp, pos, speed, t, seen, g,
-             coverage_both, duration, sign, side, pos2)
+             coverage_both, duration, sign, side, pos2,
+             pos3, (coverage3 if pos3 is not None else None))
     return 0
 
 
 def draw(png, a, plan, pieces, wp, pos, speed, t, seen, g, coverage, duration, sign, side,
-         pos2=None):
+         pos2=None, pos3=None, coverage3=None):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -842,6 +938,11 @@ def draw(png, a, plan, pieces, wp, pos, speed, t, seen, g, coverage, duration, s
                 label="return pass (after 180 deg turn)")
         ax.plot(X(pos2[-1, 1]), pos2[-1, 0], "D", color="tab:orange", ms=8,
                 label="return pass ends")
+    if pos3 is not None:
+        ax.plot(X(pos3[:, 1]), pos3[:, 0], ":", color="tab:purple", lw=2,
+                label=f"shifted return (alt., {coverage3:.0f} % with pass 1)")
+        ax.plot(X(pos3[0, 1]), pos3[0, 0], "^", color="tab:purple", ms=8,
+                label="shifted return starts (backed up after the turn)")
     s = plan.corners[0]
     e = pos[-1]
     returns = np.linalg.norm(e - pos[0]) < 1e-6
