@@ -419,6 +419,8 @@ def main() -> int:
                     help="With --listen: don't save camera pictures of detections")
     ap.add_argument("--absolute", action="store_true",
                     help="Plot raw positions. Default: the first position is (0, 0)")
+    ap.add_argument("--flight-time", type=float,
+                    help="Seconds from CMD_START to CMD_LAND, shown in the title")
     args = ap.parse_args()
 
     if args.save:
@@ -483,6 +485,12 @@ def main() -> int:
                 return 1
             plot.update(data)
             plot.fig.suptitle(f"{title}  (drone {data.drone_id})")
+            if args.flight_time is not None:     # top-right corner, above the event log
+                m, s = divmod(args.flight_time, 60.0)
+                plot.fig.text(0.995, 0.995, f"FLIGHT TIME  {int(m)}:{s:04.1f}  "
+                              f"(CMD_START → CMD_LAND)",
+                              ha="right", va="top", color="#4fe3c1", fontsize=14,
+                              fontweight="bold")
             if args.save:
                 plot.fig.savefig(args.save, dpi=130, bbox_inches="tight")
                 print(f"saved {args.save}")
