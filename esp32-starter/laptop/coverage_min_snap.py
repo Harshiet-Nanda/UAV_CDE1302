@@ -72,7 +72,7 @@ HEADING_DEG   = 0.0      # drone heading (QGC) when its nose points along the ro
 MAX_SPEED_MS  = 0.25     # peak speed; send_trajectory.py refuses > 0.30
 OVERLAP       = 0.15     # overlap between neighbouring lanes (0-0.9)
 TAG_SIZE_M    = 0.12     # tag edge length
-CAMERA_PITCH_DEG = 45.0  # camera tilt below horizontal: 45 = current mount,
+CAMERA_PITCH_DEG = 35.0  # camera tilt below horizontal: 45 = current mount,
                          # 90 = straight down. Keep equal to CAM_PITCH_DEG in
                          # laptop/apriltag_host.py.
 MAX_RANGE_M   = 1.2      # furthest camera-to-tag distance that still detects;

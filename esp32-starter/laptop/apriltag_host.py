@@ -99,7 +99,7 @@ MAX_DETECTIONS = 32     # per frame; extras are counted, not returned
 
 # Drone (body) frame: x forward, y right, z down, origin at the drone centre.
 # Camera frame (AprilTag pose): x image right, y image down, z out of the lens.
-CAM_PITCH_DEG = 45.0                # lens looks forward, tilted 45° down
+CAM_PITCH_DEG = 35.0                # lens looks forward, tilted 45° down
 CAM_POS_M     = (0.02, 0.0, 0.0)    # lens position in the drone frame
 
 _P = math.radians(CAM_PITCH_DEG)
