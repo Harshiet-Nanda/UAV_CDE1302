@@ -57,7 +57,7 @@ import scipy.sparse.linalg as spla
 # SETTINGS: edit these, then run  python trajectory/coverage_min_snap.py
 # (any of them can still be overridden on the command line, e.g. --length 6)
 # ===========================================================================
-ROOM_LENGTH_M = 5.3      # start wall -> far wall, the way the drone's nose points
+ROOM_LENGTH_M = 5.4      # start wall -> far wall, the way the drone's nose points
 ROOM_WIDTH_M  = 3.5      # along the start wall (side wall to side wall)
 MARGIN_LENGTH_M = 0.4    # closest the path may get to the start and far walls
                          # (the ends of --length). Drift along the lanes is small.
